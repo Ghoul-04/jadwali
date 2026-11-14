@@ -1,0 +1,58 @@
+name: Bot
+
+# The bot has no server: this job runs every 5 minutes from 07:00 to 22:55 Baghdad (04:00–19:55 UTC).
+# It reads what the Mini App synced, replies, and sends due notifications.
+on:
+  schedule:
+    - cron: '*/5 4-19 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # push to the `state` branch
+  actions: write    # keepalive (re-enable this workflow)
+
+concurrency:
+  group: bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Load state branch
+        run: |
+          if git fetch --depth=1 origin state 2>/dev/null; then
+            git worktree add -B state "$RUNNER_TEMP/state" FETCH_HEAD
+          else
+            git worktree add --orphan -b state "$RUNNER_TEMP/state"
+          fi
+
+      - name: Run bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          STATE_DIR: ${{ runner.temp }}/state
+          APP_URL: https://ghoul-04.github.io/jadwali/
+        run: node bot/run.mjs
+
+      - name: Save state
+        working-directory: ${{ runner.temp }}/state
+        run: |
+          git add -A
+          if git diff --cached --quiet; then echo "no state change"; exit 0; fi
+          git -c user.name="jadwali-bot" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -q -m "state: sync"
+          git push -q origin HEAD:state
+
+      # GitHub disables scheduled workflows after 60 days without repository activity.
+      - name: Keepalive
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/bot.yml/enable" --silent

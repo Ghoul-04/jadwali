@@ -37,16 +37,13 @@ export function voice({ g, p, name }) {
   };
 }
 
-export function greeting(minutes) {
-  if (minutes < 5 * 60) return 'سهرانين؟';
-  if (minutes < 12 * 60) return 'صباح الخير';
-  if (minutes < 17 * 60) return 'هلا بيك';
-  return 'مساء الخير';
-}
-
+/** Greeting addressed to the account owner, with gender agreement. */
 export function greetingFor(minutes, g) {
-  if (minutes >= 12 * 60 && minutes < 17 * 60) return g === 'f' ? 'هلا بيچ' : 'هلا بيك';
-  return greeting(minutes);
+  const f = g === 'f';
+  if (minutes < 5 * 60) return f ? 'سهرانة؟' : 'سهران؟';
+  if (minutes < 12 * 60) return f ? 'صباحچ خير' : 'صباحك خير';
+  if (minutes < 17 * 60) return f ? 'هلا بيچ' : 'هلا بيك';
+  return f ? 'مساچ خير' : 'مساك خير';
 }
 
 export function countSessions(n) {

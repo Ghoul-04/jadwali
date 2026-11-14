@@ -133,8 +133,9 @@ function normalise(data, raw, streamId, extra = {}) {
     subject: raw.subject,
     kind: raw.kind,
     instructor: raw.instructor ?? null,
-    location: raw.kind === 'lab' ? LAB_LOCATION : stream.room,
-    room: stream.room,
+    location: raw.room || (raw.kind === 'lab' ? LAB_LOCATION : stream.room),
+    room: raw.room || stream.room,
+    roomOverride: raw.room || null,
     fromStage: stream.fromStage || null,
     labGroup: raw.labGroup || null,
     ...extra,
@@ -161,7 +162,58 @@ export function streamSessions(data, streamId, { amendments = true } = {}) {
       }
     }
   }
+  // Edits made by the users from the app (synced through the bot). Always applied.
+  for (const e of stream.userEdits || []) {
+    if (e.op === 'remove') {
+      const hit = list.find((s) => s.key === e.key);
+      if (hit) removed.push({ ...hit, note: e.note || 'تعديلكم' });
+      list = list.filter((s) => s.key !== e.key);
+    } else if (e.op === 'add' && e.session && data.slots[e.session.slot] && data.subjects[e.session.subject]) {
+      list.push(normalise(data, { ...e.session, id: `edit:${e.id}` }, streamId, { edited: true, editId: e.id }));
+    } else if (e.op === 'update') {
+      const i = list.findIndex((s) => s.key === e.key);
+      if (i < 0) continue;
+      const x = list[i];
+      const raw = {
+        day: x.day, slot: x.slot, subject: x.subject, kind: x.kind, instructor: x.instructor,
+        room: x.roomOverride, labGroup: x.labGroup, ...pickDefined(e.set), id: x.key,
+      };
+      if (!data.slots[raw.slot] || !data.subjects[raw.subject]) continue;
+      list[i] = normalise(data, raw, streamId, { edited: true, editId: e.id, amended: x.amended, note: x.note });
+    }
+  }
   return { sessions: list, removed };
+}
+
+function pickDefined(o = {}) {
+  const r = {};
+  for (const [k, v] of Object.entries(o)) if (v !== undefined) r[k] = v === '' ? null : v;
+  return r;
+}
+
+/**
+ * Merge the shared (synced) state into a copy of the data:
+ *   shared = { subjects: { id: { name?, nick? } }, edits: [{ id, stream, op: 'add'|'remove'|'update', key?, session?, set? }] }
+ */
+export function applyShared(data, shared) {
+  const d = JSON.parse(JSON.stringify(data));
+  if (!shared) return d;
+  for (const [id, s] of Object.entries(shared.subjects || {})) {
+    if (!d.subjects[id] || !s) continue;
+    if (typeof s.name === 'string' && s.name.trim()) d.subjects[id].name = s.name.trim().slice(0, 40);
+    if (typeof s.nick === 'string' && s.nick.trim()) d.subjects[id].nick = s.nick.trim().slice(0, 16);
+  }
+  for (const e of shared.edits || []) {
+    const st = d.streams[e?.stream];
+    if (st) (st.userEdits ||= []).push(e);
+  }
+  return d;
+}
+
+/** Which stream an added/edited session belongs to. */
+export function streamFor(session, settings) {
+  if (session.subject === 'heat1') return withDefaults(settings).heatTrack === 'evening' ? 'heat1_evening' : 'heat1_morning';
+  return String(session.slot).startsWith('E') ? 'stage4_evening' : 'stage4_morning';
 }
 
 function profileOf(data, profileId) {
@@ -437,6 +489,47 @@ function sharedKey(x) {
 // A reference week (2026-11-15 is a Sunday) for date-less recurring computations.
 function fakeDate(dayKey) {
   return addDays('2026-11-15', DAY_KEYS.indexOf(dayKey));
+}
+
+// ───────────────────────── notifications ─────────────────────────
+
+/** nightly: 'off' | hour as string ('7' = morning summary of today; 19–22 = tomorrow's schedule). lead: minutes before a session (0 = off). */
+export const NOTIFY_DEFAULTS = { nightly: '20', lead: 15 };
+
+/** Wall-clock time in `tz` → epoch ms (offset derived from Intl, so it works on any machine). */
+export function zonedEpoch(dateStr, minutes, tz = 'Asia/Baghdad') {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const guess = Date.UTC(y, m - 1, d, 0, minutes);
+  const z = zonedNow(new Date(guess), tz);
+  const asUTC = Date.UTC(z.y, z.mo - 1, z.d, 0, z.minutes, z.seconds);
+  return guess - (asUTC - guess);
+}
+
+/** Notifications that belong to the current Baghdad day for one user. */
+export function plannedNotifications(data, profileId, settings, prefs, now = new Date()) {
+  const p = { ...NOTIFY_DEFAULTS, ...(prefs || {}) };
+  const z = zonedNow(now, data.timezone);
+  const week = buildWeek(data, profileId, settings);
+  const out = [];
+  if (p.nightly && p.nightly !== 'off') {
+    const h = Number(p.nightly);
+    const target = h < 12 ? z.dateStr : addDays(z.dateStr, 1);
+    const plan = dayPlan(data, profileId, settings, target, week);
+    if (plan.workday && !plan.holiday && activeEntries(plan).length) {
+      out.push({ id: `n|${z.dateStr}|${h}`, kind: 'summary', at: zonedEpoch(z.dateStr, h * 60, data.timezone), plan, when: h < 12 ? 'today' : 'tomorrow' });
+    }
+  }
+  if (Number(p.lead) > 0) {
+    const plan = dayPlan(data, profileId, settings, z.dateStr, week);
+    for (const e of activeEntries(plan)) {
+      out.push({
+        id: `l|${z.dateStr}|${e.start}`, kind: 'lead', entry: e, plan,
+        at: zonedEpoch(z.dateStr, e.start - Number(p.lead), data.timezone),
+        startAt: zonedEpoch(z.dateStr, e.start, data.timezone),
+      });
+    }
+  }
+  return out.sort((a, b) => a.at - b.at);
 }
 
 // ───────────────────────── sharing / text ─────────────────────────

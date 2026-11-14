@@ -14,8 +14,8 @@
     "E3": ["18:30", "19:30"]
   },
   "profiles": {
-    "carrier":  { "name": "محمد", "gender": "m", "dropSubjects": ["control"], "addHeat1": true },
-    "standard": { "name": "خلود", "gender": "f", "dropSubjects": [], "addHeat1": false }
+    "carrier":  { "name": "محمد", "gender": "m", "photo": "assets/mohammed.jpg", "dropSubjects": ["control"], "addHeat1": true },
+    "standard": { "name": "خلود", "gender": "f", "photo": "assets/kholoud.jpg", "dropSubjects": [], "addHeat1": false }
   },
   "subjects": {
     "reactors":  { "name": "تصميم مفاعلات 1",   "nick": "مفاعلات", "symbol": "Rx" },

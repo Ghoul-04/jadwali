@@ -3,8 +3,11 @@
 
 const W = typeof window !== 'undefined' ? window.Telegram?.WebApp : undefined;
 
-/** True only when actually launched inside Telegram (initData present). */
-export const inTelegram = !!(W && W.initData);
+/** True when launched inside Telegram (menu button gives initData; keyboard button may not). */
+export const inTelegram = !!(W && (W.initData || (W.platform && W.platform !== 'unknown')));
+
+/** sendData only works when the app was opened from the bot's keyboard button (no query_id). */
+export const canSendData = inTelegram && !W.initDataUnsafe?.query_id && typeof W.sendData === 'function';
 
 export function atLeast(v) {
   try { return !!(W && W.isVersionAtLeast && W.isVersionAtLeast(v)); } catch { return false; }
@@ -76,6 +79,8 @@ export const tg = {
     }
     window.open(url, '_blank', 'noopener');
   },
+
+  sendData(str) { if (canSendData) W.sendData(str); },
 
   hasCloud() { return inTelegram && atLeast('6.9') && !!W.CloudStorage; },
   cloud: W?.CloudStorage,

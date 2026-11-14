@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
   buildWeek, nowInfo, defaultView, nextHeat, together, heatTip, dayPlan,
   zonedNow, durationAr, time12, planText, freeWindows, minToHHMM, weekStart,
+  applyShared, streamFor, plannedNotifications, zonedEpoch,
 } from '../core/schedule.js';
 
 const data = JSON.parse(readFileSync(new URL('../data/schedule.json', import.meta.url), 'utf8'));
@@ -179,6 +180,45 @@ test('manual overrides: holiday and cancelled session on a date only', () => {
   assert.equal(other.entries.find((e) => e.sessions[0].subject === 'equipment').active, true);
   const h = dayPlan(data, 'carrier', { ...DEF, overrides: { '2026-11-16': { holiday: true } } }, '2026-11-16');
   assert.equal(h.holiday, true);
+});
+
+test('shared edits: update, remove, add and subject rename (both profiles see them)', () => {
+  const shared = {
+    subjects: { units: { name: 'الوحدات الصناعية 2', nick: 'وحدات' } },
+    edits: [
+      { id: 'a1', stream: 'stage4_morning', op: 'update', key: 'stage4_morning:mon:S2:equipment:lecture', set: { slot: 'S1', room: 'قاعة 7' } },
+      { id: 'a2', stream: 'stage4_morning', op: 'remove', key: 'stage4_morning:wed:S3:refining:lecture' },
+      { id: 'a3', stream: 'stage4_morning', op: 'add', session: { day: 'wed', slot: 'S1', subject: 'units', kind: 'lecture', instructor: 'د. علاء' } },
+    ],
+  };
+  const d2 = applyShared(data, shared);
+  assert.equal(data.subjects.units.name, 'الوحدات الصناعية'); // original untouched
+  for (const p of ['carrier', 'standard']) {
+    const w = buildWeek(d2, p, DEF);
+    const eq = w.days.mon.flatMap((e) => e.sessions).find((x) => x.subject === 'equipment');
+    assert.equal(eq.slot, 'S1');
+    assert.equal(eq.location, 'قاعة 7');
+    assert.equal(eq.key, 'stage4_morning:mon:S2:equipment:lecture'); // key kept → choices/overrides survive
+    assert.ok(!w.days.wed.some((e) => e.sessions.some((x) => x.subject === 'refining')));
+    assert.ok(w.days.wed.some((e) => e.sessions[0].subject === 'units' && e.sessions[0].slot === 'S1'));
+  }
+  assert.equal(d2.subjects.units.name, 'الوحدات الصناعية 2');
+  assert.equal(streamFor({ subject: 'heat1', slot: 'S1' }, DEF), 'heat1_morning');
+  assert.equal(streamFor({ subject: 'units', slot: 'E1' }, DEF), 'stage4_evening');
+});
+
+test('notifications: 8 PM summary of tomorrow + 15 min before each lecture', () => {
+  const sat = plannedNotifications(data, 'carrier', DEF, { nightly: '20', lead: 15 }, at('2026-11-14T19:00'));
+  assert.deepEqual(sat.map((n) => n.kind), ['summary']);
+  assert.equal(sat[0].at, at('2026-11-14T20:00').getTime());
+  assert.equal(sat[0].plan.dateStr, '2026-11-15');
+  const mon = plannedNotifications(data, 'carrier', DEF, { nightly: '20', lead: 15 }, at('2026-11-16T07:00'));
+  assert.deepEqual(mon.filter((n) => n.kind === 'lead').map((n) => n.at), [at('2026-11-16T10:15').getTime(), at('2026-11-16T12:15').getTime()]);
+  const thu = plannedNotifications(data, 'carrier', DEF, { nightly: '20', lead: 0 }, at('2026-11-19T07:00'));
+  assert.equal(thu.length, 0); // Friday tomorrow → no summary, lead off
+  const morning = plannedNotifications(data, 'standard', DEF, { nightly: '7', lead: 0 }, at('2026-11-15T06:00'));
+  assert.equal(morning[0].when, 'today');
+  assert.equal(zonedEpoch('2026-11-15', 8 * 60 + 30), Date.parse('2026-11-15T05:30:00Z'));
 });
 
 test('helpers: 12h time, Arabic durations, free windows, week start, share text', () => {

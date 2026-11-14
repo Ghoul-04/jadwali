@@ -1,6 +1,6 @@
 // app/main.js — bootstrap, state, rendering of all screens.
 import * as S from '../core/schedule.js';
-import { tg, inTelegram, atLeast } from './telegram.js';
+import { tg, inTelegram, atLeast, canSendData } from './telegram.js';
 import { storage, pruneOverrides } from './storage.js';
 import { voice, dateLabel, greetingFor, countSessions, countClashes } from './i18n.js';
 import { icons } from './icons.js';
@@ -8,6 +8,8 @@ import * as U from './ui.js';
 
 const { esc, t12, range12, tile } = U;
 const BOT_LINK = 'https://t.me/ShnoBajer_bot';
+// Shared state (synced through the bot) lives on the repo's `state` branch.
+const SHARED_URL = 'https://raw.githubusercontent.com/Ghoul-04/jadwali/state/shared.json';
 
 // ───────── clock (supports ?now=YYYY-MM-DDTHH:MM for testing; ticks from there) ─────────
 const params = new URLSearchParams(location.search);
@@ -18,6 +20,13 @@ const now = () => new Date(mockStart ? mockStart + (Date.now() - bootReal) : Dat
 
 // ───────── state ─────────
 const state = {
+  base: null,                   // data/schedule.json as shipped
+  shared: null,                 // synced edits + people (from the state branch)
+  outbox: { edits: [], subjects: {} }, // local edits not yet confirmed by the bot
+  notify: { nightly: '20', lead: 15 },
+  dirty: false,                 // something to sync
+  editing: null,                // edit-sheet draft
+  editDay: null,
   data: null,
   profile: null,                // 'carrier' | 'standard'
   settings: S.defaultSettings(),
@@ -37,7 +46,48 @@ const other = (id) => (id === 'carrier' ? 'standard' : 'carrier');
 const prof = (id) => state.data.profiles[id];
 const viewId = () => (state.peek ? other(state.profile) : state.profile);
 function partnerSettings() {
-  return { ...S.defaultSettings(), ...state.partner, amendments: state.settings.amendments, clashChoices: {}, overrides: {} };
+  const synced = state.shared?.people?.[other(state.profile)] || {};
+  return { ...S.defaultSettings(), ...state.partner, ...pick(synced, ['shift', 'heatTrack', 'labGroup']), amendments: state.settings.amendments, clashChoices: synced.clash || {}, overrides: {} };
+}
+
+/** shared (confirmed) + outbox (pending) → the edits the app shows. */
+function mergedShared() {
+  const sh = state.shared || {};
+  const reverts = new Set(state.outbox.edits.filter((e) => e.op === 'revert').map((e) => e.id));
+  const have = new Set((sh.edits || []).map((e) => e.id));
+  return {
+    subjects: { ...(sh.subjects || {}), ...state.outbox.subjects },
+    edits: (sh.edits || []).filter((e) => !reverts.has(e.id)).concat(state.outbox.edits.filter((e) => e.op !== 'revert' && !have.has(e.id))),
+  };
+}
+function recompute() { state.data = S.applyShared(state.base, mergedShared()); }
+
+/** Drop outbox items the bot has already applied. */
+function reconcileOutbox() {
+  const sh = state.shared;
+  if (!sh) return;
+  const have = new Set((sh.edits || []).map((e) => e.id));
+  const before = JSON.stringify(state.outbox);
+  state.outbox.edits = state.outbox.edits.filter((e) => (e.op === 'revert' ? have.has(e.id) : !have.has(e.id)));
+  for (const [k, v] of Object.entries(state.outbox.subjects)) {
+    const s = sh.subjects?.[k];
+    if (s && s.name === v.name && s.nick === v.nick) delete state.outbox.subjects[k];
+  }
+  if (JSON.stringify(state.outbox) !== before) storage.set('outbox', state.outbox);
+}
+
+async function loadShared() {
+  try {
+    const res = await fetch(`${SHARED_URL}?t=${Math.floor(Date.now() / 60000)}`, { cache: 'no-store' });
+    if (!res.ok) return false;
+    const sh = await res.json();
+    const changed = JSON.stringify(sh) !== JSON.stringify(state.shared);
+    state.shared = sh;
+    try { localStorage.setItem('jadwali.sharedCache', JSON.stringify(sh)); } catch {}
+    reconcileOutbox();
+    recompute();
+    return changed;
+  } catch { return false; }
 }
 const viewSettings = () => (state.peek ? partnerSettings() : state.settings);
 const V = () => voice({ g: prof(viewId()).gender, p: state.peek ? 3 : 2, name: prof(viewId()).name });
@@ -62,6 +112,9 @@ function applyStored(st) {
   if (st.overrides) state.settings.overrides = st.overrides;
   if (st.partner) Object.assign(state.partner, st.partner);
   if (st.theme) state.themePref = st.theme;
+  if (st.outbox?.edits) state.outbox = { edits: st.outbox.edits, subjects: st.outbox.subjects || {} };
+  if (st.notify) Object.assign(state.notify, st.notify);
+  if (typeof st.dirty === 'boolean') state.dirty = st.dirty;
 }
 function pick(o, keys) { const r = {}; for (const k of keys) if (o[k] !== undefined) r[k] = o[k]; return r; }
 
@@ -76,6 +129,10 @@ function save(what) {
   }
   if (what === 'partner') storage.set('partner', state.partner);
   if (what === 'theme') storage.set('theme', state.themePref);
+  if (what === 'outbox') storage.set('outbox', state.outbox);
+  if (what === 'notify') storage.set('notify', state.notify);
+  // Anything the bot or the other person needs to know makes the app "dirty" until synced.
+  if (['profile', 'settings', 'clash', 'outbox', 'notify'].includes(what) && !state.dirty) { state.dirty = true; storage.set('dirty', true); }
 }
 
 // ───────── theme ─────────
@@ -130,15 +187,17 @@ function render({ anim = true } = {}) {
 function renderTop() {
   const z = Z();
   const meName = prof(state.profile).name;
-  const tgName = tg.user?.first_name;
   const otherName = prof(other(state.profile)).name;
   const g = prof(state.profile).gender;
   $('#top').innerHTML = `
     <div class="top-row">
       <div class="hello">
-        <span class="hello-k">${greetingFor(z.minutes, g)}${state.sub ? '' : ''}</span>
-        <h1 class="hello-n">${esc(tgName || meName)}</h1>
-        <span class="hello-d">${dateLabel(z.dateStr)}</span>
+        ${avatar(state.profile, 'sm')}
+        <div class="hello-txt">
+          <span class="hello-k">${greetingFor(z.minutes, g)}</span>
+          <h1 class="hello-n">${esc(meName)}</h1>
+          <span class="hello-d">${dateLabel(z.dateStr)}</span>
+        </div>
       </div>
       <div class="top-actions">
         ${state.sub ? '' : `<button class="chip-btn ${state.peek ? 'on' : ''}" data-act="peek" aria-pressed="${state.peek}">${icons.eye()}<span>${state.peek ? 'جدولي' : `جدول ${esc(otherName)}`}</span></button>`}
@@ -162,10 +221,20 @@ function renderTabs() {
 }
 
 function syncBack() {
-  if (state.sheet) tg.back.show(() => closeSheet());
+  if (state.editing) tg.back.show(() => act.editClose());
+  else if (state.sheet) tg.back.show(() => closeSheet());
   else if (state.sub) tg.back.show(() => act.closeSub());
   else if (state.peek) tg.back.show(() => act.peek());
   else tg.back.hide();
+}
+
+/** Hexagon-framed photo (benzene ring) with an animated gradient ring. */
+function avatar(id, size = 'md') {
+  const p = prof(id);
+  return `<span class="ava ava--${size} ${id === 'carrier' ? 'ava-m' : 'ava-f'}" aria-hidden="true">
+    <span class="ava-ring"></span>
+    <span class="ava-img"><b>${esc(p.name[0])}</b>${p.photo ? `<img src="${esc(p.photo)}" alt="" decoding="async" onerror="this.remove()">` : ''}</span>
+  </span>`;
 }
 
 // ───────── entries ─────────
@@ -397,18 +466,8 @@ const VIEWS = {
       </button>`;
     }).join('');
 
-    const tip = S.heatTip(d, s, id);
-    const ow = tip.otherWindows.map((w) => `${S.DAY_NAMES[w.day]} ${t12(w.start)}–${t12(w.end)}`).join('، ');
-    const tipCard = tip.suggest ? `<section class="tip rise">
-        <div class="tip-ico">${icons.sparkle()}</div>
-        <div><b>فكرة تخلص من ${countClashes(tip.currentClashes)}</b>
-        <p>إذا تحضر هيت 1 ويه ${tip.other === 'evening' ? 'المسائي' : 'الصباحي'} (${ow}) تنحل كل التصادمات، <u>إذا القسم يسمح</u>.</p>
-        ${readOnly() ? '' : `<button class="btn ghost sm" data-act="set" data-name="heatTrack" data-value="${tip.other}">جرّب ويه ${tip.other === 'evening' ? 'المسائي' : 'الصباحي'}</button>`}</div>
-      </section>` : tip.currentClashes === 0 ? `<p class="ok-line rise">${icons.check()}<span>ماكو ولا تصادم ويه هالاختيار</span></p>` : '';
-
-    const controls = readOnly() ? '' : `<section class="card controls rise">
-      <h4>هيت 1 وياهم منو؟</h4>
-      ${U.segmented('heatTrack', s.heatTrack, [['morning', 'ويه الصباحي'], ['evening', 'ويه المسائي']])}
+    const tipCard = '';
+    const controls = readOnly() || s.heatTrack !== 'morning' ? '' : `<section class="card controls rise">
       ${s.heatTrack === 'morning' ? `<h4>كروب المختبر (الخميس)</h4>
       ${U.segmented('labGroup', s.labGroup, [['A', 'A · 10:30'], ['B', 'B · 12:30'], ['both', 'الاثنين'], ['unknown', 'ما أعرف']])}
       <p class="hint">${s.labGroup === 'unknown' ? 'دنعرضلك المختبرين لحد ما تعرف كروبك.' : s.labGroup === 'both' ? 'مختبر 4 ساعات (10:30 – 2:30).' : ''}</p>` : ''}
@@ -459,7 +518,7 @@ const VIEWS = {
         <p class="hint">ضمن الدوام (${t12(t.range.from)} – ${t12(t.range.to)}).${state.partner.shift !== 'morning' || (prof(you).addHeat1 && state.partner.heatTrack !== 'morning') ? '' : ` إعدادات ${esc(nB)} تتعدل من الإعدادات.`}</p>
       </section>
       <div class="day-chips rise">${chips}</div>
-      <div class="tg-head rise"><span></span><b class="who-a">${esc(nA)}</b><b class="who-b">${esc(nB)}</b></div>
+      <div class="tg-head rise"><span></span><b class="who-a">${avatar(me, 'xs')}${esc(nA)}</b><b class="who-b">${avatar(you, 'xs')}${esc(nB)}</b></div>
       <div class="tg rise" style="height:${H}px">
         <div class="tg-axis">${axis}</div>
         <div class="tg-lanes">
@@ -484,9 +543,32 @@ function viewSettingsPage() {
   const week = S.buildWeek(d, me, s);
   const findKey = (k) => Object.values(week.days).flat().flatMap((e) => e.sessions).find((x) => x.key === k);
   const upcoming = Object.entries(s.overrides).filter(([ds]) => ds >= z.dateStr).sort();
-  const uid = tg.user?.id;
+  const youName = esc(prof(you).name);
+  const f = prof(me).gender === 'f';
+  const pending = state.outbox.edits.length + Object.keys(state.outbox.subjects).length;
 
   return `<header class="page-h rise"><h2>الإعدادات</h2><span>تنحفظ ب${storage.backend() === 'cloud' ? 'تيليگرام (CloudStorage)' : 'هالمتصفح'}</span></header>
+
+  <section class="card set sync ${state.dirty ? 'dirty' : 'clean'} rise">
+    <h4>${icons.swap()} المزامنة ويه ${youName} والبوت</h4>
+    <p class="sync-state">${state.dirty ? `<b>${f ? 'عندچ' : 'عندك'} تغييرات ما وصلت بعد</b>${pending ? ` · ${pending} تعديل بالجدول` : ''}` : `${icons.check()}<span>كلشي واصل</span>`}</p>
+    <button class="btn primary" data-act="sync">${icons.swap()}<span>احفظ ودزها للبوت</span></button>
+    <p class="hint">${canSendData
+      ? `التطبيق راح يتسكر وتجي${f ? 'چ' : 'ك'} رسالة تأكيد من البوت. التعديلات توصل لـ${youName} خلال دقائق.`
+      : `المزامنة تشتغل بس من زر «📅 جدولي» اللي <b>تحت مربع الكتابة</b> بالبوت (مو زر القائمة). إذا ما موجود، دز /start للبوت.`}</p>
+  </section>
+
+  <section class="card set rise">
+    <h4>${icons.bell()} التنبيهات</h4>
+    <label class="field"><span>رسالة الجدول</span>
+      <select data-input="notify.nightly">${[['off', 'مطفية'], ['7', '7 الصبح · جدول اليوم'], ['19', '7 بالليل · جدول باجر'], ['20', '8 بالليل · جدول باجر'], ['21', '9 بالليل · جدول باجر'], ['22', '10 بالليل · جدول باجر']]
+        .map(([v, l]) => `<option value="${v}" ${String(state.notify.nightly) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+    <span class="field-k">قبل كل محاضرة</span>
+    ${U.segmented('lead', String(state.notify.lead), [['0', 'لا'], ['10', '10 دقايق'], ['15', 'ربع ساعة'], ['30', 'نص ساعة']], { act: 'setNotify' })}
+    <p class="hint">البوت يدز التنبيه. GitHub أحياناً يتأخر كم دقيقة.</p>
+  </section>
+
+  ${editScheduleCard()}
 
   <section class="card set rise" style="--i:1">
     <h4>${icons.user()} منو أنت؟</h4>
@@ -524,25 +606,113 @@ function viewSettingsPage() {
     ${upcoming.length ? `<div class="ov-list">${upcoming.map(([ds, o]) => `<div class="row-line"><span><b>${dateLabel(ds)}</b> ${o.holiday ? '· عطلة' : ''}${(o.cancelled || []).length ? ` · ${(o.cancelled || []).length} ملغية` : ''}${o.note ? ` · ${esc(o.note)}` : ''}</span><button class="link" data-act="ovDelete" data-date="${ds}">مسح</button></div>`).join('')}</div>` : ''}
   </section>
 
-  <section class="card set rise" style="--i:5">
-    <h4>${icons.together()} جدول ${esc(prof(you).name)}</h4>
-    <p class="hint">حتى تطلع "سوه" و"شوف جدول ${esc(prof(you).name)}" صح.</p>
+  ${state.shared?.people?.[you] ? '' : `<section class="card set rise" style="--i:5">
+    <h4>${icons.together()} جدول ${youName}</h4>
+    <p class="hint">من ${youName} ${prof(you).gender === 'f' ? 'تسوي' : 'يسوي'} مزامنة، هاي تتحدث وحدها. لحد ذاك، عدّلها هنا حتى تطلع "سوه" صح.</p>
     ${U.segmented('shift', state.partner.shift, [['morning', 'صباحي'], ['evening', 'مسائي']], { act: 'setPartner' })}
     ${prof(you).addHeat1 ? U.segmented('heatTrack', state.partner.heatTrack, [['morning', 'هيت ويه الصباحي'], ['evening', 'هيت ويه المسائي']], { act: 'setPartner' }) : ''}
-  </section>
+  </section>`}
 
   <section class="card set rise" style="--i:6">
     <h4>المظهر</h4>
     ${U.segmented('theme', state.themePref, [['auto', inTelegram ? 'مثل تيليگرام' : 'تلقائي'], ['light', 'فاتح'], ['dark', 'غامق']], { act: 'setTheme' })}
   </section>
 
-  <section class="card set rise" style="--i:7">
-    <h4>رقمك بتيليگرام (للتذكير الليلي)</h4>
-    ${uid ? `<div class="id-row"><code dir="ltr">${uid}</code><button class="btn ghost sm" data-act="copyId" data-id="${uid}">${icons.copy()}<span>نسخ</span></button></div>`
-      : '<p class="hint">افتح التطبيق من داخل تيليگرام حتى يطلع رقمك هنا.</p>'}
-  </section>
-
   <p class="foot rise">${esc(d.department)} · ${esc(d.semester)}<br>شنو باجر · جدولي</p>`;
+}
+
+// ───────── schedule editor (shared with the other person through the bot) ─────────
+const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+function describeKey(key) {
+  const d = state.data;
+  if (key.startsWith('edit:')) return 'محاضرة مضافة';
+  if (key.startsWith('amend:')) { const [, , day, slot, sub] = key.split(':'); return `${d.subjects[sub]?.nick || sub} ${S.DAY_NAMES[day] || ''} ${S.time12Str(S.toMin(d.slots[slot]?.[0] || '00:00'))}`; }
+  const id = key.split(':');
+  const [, day, slot, sub] = id.length >= 5 ? id : [null, ...id];
+  if (!d.subjects[sub] || !d.slots[slot]) return key;
+  return `${d.subjects[sub].nick} ${S.DAY_NAMES[day]} ${S.time12Str(S.toMin(d.slots[slot][0]))}`;
+}
+
+function describeEdit(e) {
+  const d = state.data;
+  if (e.op === 'add') { const s = e.session; return `➕ ${d.subjects[s.subject]?.nick} · ${S.DAY_NAMES[s.day]} ${S.time12Str(S.toMin(d.slots[s.slot][0]))}`; }
+  if (e.op === 'remove') return `✖ حذف ${describeKey(e.key)}`;
+  const set = e.set || {};
+  const bits = [];
+  if (set.day || set.slot) bits.push(`${set.day ? S.DAY_NAMES[set.day] : ''} ${set.slot ? S.time12Str(S.toMin(d.slots[set.slot][0])) : ''}`.trim());
+  if (set.room) bits.push(set.room);
+  if (set.instructor) bits.push(set.instructor);
+  if (set.kind) bits.push(S.KIND_NAMES[set.kind]);
+  return `✏️ ${describeKey(e.key)} ← ${bits.join(' · ') || 'تعديل'}`;
+}
+
+function editScheduleCard() {
+  const d = state.data, me = state.profile, s = state.settings;
+  if (!state.editDay) state.editDay = d.workdays.includes(Z().dayKey) ? Z().dayKey : 'sun';
+  const week = S.buildWeek(d, me, s);
+  const list = week.days[state.editDay].flatMap((e) => e.sessions);
+  const ms = mergedShared();
+  const pendingIds = new Set(state.outbox.edits.map((e) => e.id));
+  const reverting = new Set(state.outbox.edits.filter((e) => e.op === 'revert').map((e) => e.id));
+  const shownEdits = [...(state.shared?.edits || []), ...state.outbox.edits.filter((e) => e.op !== 'revert' && !(state.shared?.edits || []).some((x) => x.id === e.id))];
+  return `<section class="card set rise">
+    <h4>${icons.edit()} تعديل المواد والمحاضرات</h4>
+    <p class="hint">أي تعديل هنا يتطبق على ${esc(prof(other(me)).name)} هم (نفس المرحلة) بعد المزامنة.</p>
+    <div class="day-chips mini">${d.workdays.map((dk) => `<button class="day-chip ${dk === state.editDay ? 'on' : ''}" data-act="editDay" data-day="${dk}"><b>${S.DAY_NAMES[dk].replace('ال', '')}</b></button>`).join('')}</div>
+    <div class="ed-list">${list.length ? list.map((x) => `
+      <div class="ed-row ${x.edited ? 'is-edited' : ''}">
+        ${tile(d, x.subject, { size: 'xs' })}
+        <span class="ed-txt"><b>${esc(d.subjects[x.subject].nick)}</b><small>${t12(x.start)} · ${S.KIND_NAMES[x.kind]} · ${esc(x.location)}</small></span>
+        <button class="icon-btn sm" data-act="editOpen" data-key="${esc(x.key)}" aria-label="تعديل">${icons.edit()}</button>
+        <button class="icon-btn sm danger" data-act="editRemove" data-key="${esc(x.key)}" data-stream="${x.stream}" aria-label="حذف">${icons.close()}</button>
+      </div>`).join('') : '<p class="hint">ماكو محاضرات بهاليوم.</p>'}</div>
+    <button class="btn ghost sm" data-act="editAdd">+ إضافة محاضرة ليوم ${S.DAY_NAMES[state.editDay]}</button>
+    ${shownEdits.length ? `<h4 class="sub-h">تعديلاتكم</h4><div class="ov-list">${shownEdits.map((e) => `
+      <div class="row-line ${reverting.has(e.id) ? 'is-cancel' : ''}"><span>${esc(describeEdit(e))}${pendingIds.has(e.id) ? ' <em class="tag">ينتظر مزامنة</em>' : ''}${reverting.has(e.id) ? ' <em class="tag tag-cancel">راح يرجع</em>' : ''}</span>
+      ${reverting.has(e.id) ? '' : `<button class="link" data-act="editRevert" data-id="${esc(e.id)}">تراجع</button>`}</div>`).join('')}</div>` : ''}
+    <details class="names"><summary>أسماء المواد</summary>
+      ${Object.entries(state.data.subjects).map(([id, sub]) => `<label class="field row">${tile(d, id, { size: 'xs' })}<input type="text" maxlength="40" value="${esc(sub.name)}" data-input="subj" data-id="${id}" aria-label="اسم ${esc(sub.nick)}"></label>`).join('')}
+    </details>
+  </section>`;
+  void ms;
+}
+
+function editSheetHTML() {
+  const d = state.data, ed = state.editing, x = ed.draft;
+  const opt = (pairs, v) => pairs.map(([k, l]) => `<option value="${k}" ${k === v ? 'selected' : ''}>${l}</option>`).join('');
+  const subjects = Object.entries(d.subjects).map(([k, s]) => [k, `${s.symbol} · ${s.name}`]);
+  const slots = Object.keys(d.slots).map((k) => [k, `${S.time12Str(S.toMin(d.slots[k][0]))} – ${S.time12Str(S.toMin(d.slots[k][1]))}`]);
+  return `<div class="scrim" data-act="editClose"></div>
+    <div class="sheet edit-sheet" role="dialog" aria-modal="true">
+      <div class="sheet-grab"></div>
+      <h3 class="ed-title">${tile(d, x.subject, { size: 'sm' })}<span>${ed.mode === 'add' ? 'محاضرة جديدة' : 'تعديل المحاضرة'}</span></h3>
+      <label class="field"><span>المادة</span><select data-input="ed.subject" ${ed.mode === 'update' ? 'disabled' : ''}>${opt(subjects, x.subject)}</select></label>
+      <div class="grid2">
+        <label class="field"><span>اليوم</span><select data-input="ed.day">${opt(d.workdays.map((k) => [k, S.DAY_NAMES[k]]), x.day)}</select></label>
+        <label class="field"><span>الوكت</span><select data-input="ed.slot">${opt(slots, x.slot)}</select></label>
+      </div>
+      <span class="field-k">النوع</span>
+      ${U.segmented('kind', x.kind, [['lecture', 'محاضرة'], ['lab', 'مختبر'], ['project', 'مشروع']], { act: 'edKind' })}
+      <div class="grid2">
+        <label class="field"><span>التدريسي</span><input type="text" maxlength="30" value="${esc(x.instructor || '')}" data-input="ed.instructor" placeholder="مثلاً: د. علاء"></label>
+        <label class="field"><span>القاعة</span><input type="text" maxlength="20" value="${esc(x.room || '')}" data-input="ed.room" placeholder="${x.kind === 'lab' ? 'مختبر' : 'قاعة 1'}"></label>
+      </div>
+      <div class="ed-actions">
+        <button class="btn primary" data-act="editSave">${icons.check()}<span>${ed.mode === 'add' ? 'أضف' : 'احفظ التعديل'}</span></button>
+        <button class="btn ghost" data-act="editClose">إلغاء</button>
+      </div>
+      <p class="hint">بعدها دوس «احفظ ودزها للبوت» حتى يوصل لـ${esc(prof(other(state.profile)).name)}.</p>
+    </div>`;
+}
+
+function findSession(key) {
+  return Object.values(S.buildWeek(state.data, state.profile, state.settings).days).flat().flatMap((e) => e.sessions).find((x) => x.key === key);
+}
+
+function pushEdit(e) {
+  state.outbox.edits.push(e);
+  save('outbox'); recompute(); tg.haptic('success');
 }
 
 function nextWorkday(dateStr) {
@@ -554,6 +724,7 @@ function nextWorkday(dateStr) {
 // ───────── detail sheet ─────────
 function renderSheet() {
   const root = $('#sheet-root');
+  if (state.editing) { root.innerHTML = editSheetHTML(); return; }
   if (!state.sheet) { root.innerHTML = ''; return; }
   const d = state.data;
   const s = viewSettings();
@@ -600,14 +771,15 @@ function renderPicker() {
   $('#tabs').hidden = true;
   $('#view').innerHTML = '';
   const d = state.data;
-  const card = (id, sym, line) => `<button class="pick s-${id === 'carrier' ? 'heat1' : 'reactors'}" data-act="pick" data-id="${id}">
-      <div class="el el--xl ${id === 'carrier' ? 's-heat1' : 's-reactors'}"><span class="el-n">${id === 'carrier' ? 4 : 4}</span><span class="el-sym">${sym}</span><span class="el-nick">${esc(prof(id).name)}</span></div>
+  const card = (id, sym, line) => `<button class="pick s-${id === 'carrier' ? 'heat1' : 'equipment'}" data-act="pick" data-id="${id}">
+      ${avatar(id, 'xl')}
+      <span class="pick-el el s-${id === 'carrier' ? 'heat1' : 'equipment'}"><span class="el-sym">${sym}</span></span>
       <b>${esc(prof(id).name)}</b><span>${line}</span></button>`;
   $('#picker-root').innerHTML = `<div class="picker">
     <div class="picker-hex" aria-hidden="true"></div>
     <p class="picker-k">شنو باجر · جدولي</p>
     <h1>منو أنت؟</h1>
-    <p class="picker-sub">${tg.user?.first_name ? `هلا ${esc(tg.user.first_name)}! ` : ''}اختار مرة وحدة، وتگدر تغيرها من الإعدادات.</p>
+    <p class="picker-sub">دوس على صورتك، والتطبيق كله يصير إلك.</p>
     <div class="pick-row">
       ${card('carrier', 'Mo', 'الرابع + هيت 1 محمول')}
       ${card('standard', 'Kh', 'الرابع · جدول كامل')}
@@ -705,6 +877,63 @@ const act = {
     const text = S.planText(state.data, plan, { title: `📅 جدول ${who} · ${el.dataset.title} (${dateLabel(plan.dateStr)})` });
     tg.openLink(`https://t.me/share/url?url=${encodeURIComponent(BOT_LINK)}&text=${encodeURIComponent(text)}`);
   },
+  setNotify(el) { state.notify.lead = Number(el.dataset.value); save('notify'); tg.haptic('select'); render({ anim: false }); },
+  editDay(el) { state.editDay = el.dataset.day; tg.haptic('select'); render({ anim: false }); },
+  editAdd() {
+    const slot = state.settings.shift === 'evening' ? 'E1' : 'S1';
+    state.editing = { mode: 'add', draft: { day: state.editDay, slot, subject: 'units', kind: 'lecture', instructor: '', room: '' } };
+    renderSheet(); syncBack();
+  },
+  editOpen(el) {
+    const x = findSession(el.dataset.key);
+    if (!x) return;
+    state.editing = { mode: 'update', key: x.key, stream: x.stream, orig: x, draft: { day: x.day, slot: x.slot, subject: x.subject, kind: x.kind, instructor: x.instructor || '', room: x.roomOverride || '' } };
+    renderSheet(); syncBack();
+  },
+  edKind(el) { state.editing.draft.kind = el.dataset.value; renderSheet(); },
+  editClose() { state.editing = null; renderSheet(); syncBack(); },
+  editSave() {
+    const ed = state.editing, x = ed.draft;
+    const clean = { day: x.day, slot: x.slot, subject: x.subject, kind: x.kind, instructor: x.instructor.trim() || null, room: x.room.trim() || null };
+    if (ed.mode === 'add') {
+      pushEdit({ id: newId(), stream: S.streamFor(clean, state.settings), op: 'add', session: clean });
+    } else {
+      const o = ed.orig, set = {};
+      for (const k of ['day', 'slot', 'kind']) if (clean[k] !== o[k]) set[k] = clean[k];
+      if ((clean.instructor || null) !== (o.instructor || null)) set.instructor = clean.instructor || '';
+      if ((clean.room || null) !== (o.roomOverride || null)) set.room = clean.room || '';
+      if (Object.keys(set).length) pushEdit({ id: newId(), stream: ed.stream, op: 'update', key: ed.key, set });
+    }
+    state.editing = null; render({ anim: false });
+  },
+  editRemove(el) {
+    pushEdit({ id: newId(), stream: el.dataset.stream, op: 'remove', key: el.dataset.key });
+    render({ anim: false });
+  },
+  editRevert(el) {
+    const id = el.dataset.id;
+    const local = state.outbox.edits.findIndex((e) => e.id === id && e.op !== 'revert');
+    if (local >= 0) state.outbox.edits.splice(local, 1);
+    else state.outbox.edits.push({ id, op: 'revert' });
+    save('outbox'); recompute(); render({ anim: false });
+  },
+  sync() {
+    const payload = {
+      v: 1, profile: state.profile,
+      prefs: { ...pick(state.settings, ['shift', 'heatTrack', 'labGroup']), nightly: String(state.notify.nightly), lead: Number(state.notify.lead), clash: state.settings.clashChoices },
+      edits: state.outbox.edits, subjects: state.outbox.subjects,
+    };
+    const str = JSON.stringify(payload);
+    if (new TextEncoder().encode(str).length > 4096) { toast('التعديلات هواية مرة وحدة، دز قسم منها وبعدين الباقي.'); return; }
+    if (!canSendData) {
+      toast('افتح التطبيق من زر «📅 جدولي» اللي تحت مربع الكتابة بالبوت، وبعدين دوس مزامنة.');
+      return;
+    }
+    state.dirty = false;
+    storage.set('dirty', false);
+    tg.haptic('success');
+    setTimeout(() => tg.sendData(str), 120);
+  },
   async copyId(el) {
     const id = el.dataset.id;
     try { await navigator.clipboard.writeText(id); } catch {
@@ -762,9 +991,12 @@ async function boot() {
   tg.init();
   applyInsets();
   const res = await fetch('data/schedule.json', { cache: 'no-cache' });
-  state.data = await res.json();
+  state.base = await res.json();
+  try { state.shared = JSON.parse(localStorage.getItem('jadwali.sharedCache') || 'null'); } catch {}
 
   applyStored(storage.loadLocal());
+  recompute();
+  loadShared().then((changed) => { if (changed && state.profile) render({ anim: false }); });
   const forcedProfile = params.get('profile');
   if (forcedProfile === 'carrier' || forcedProfile === 'standard') state.profile = forcedProfile;
   applyTheme();
@@ -777,6 +1009,7 @@ async function boot() {
   if (cloud && Object.values(cloud).some((v) => v !== null)) {
     const before = JSON.stringify([state.profile, state.settings, state.partner, state.themePref]);
     applyStored(cloud);
+    recompute();
     if (JSON.stringify([state.profile, state.settings, state.partner, state.themePref]) !== before) {
       applyTheme();
       if (!state.tab || !before.includes(state.profile)) state.tab = smartTab();
@@ -784,7 +1017,7 @@ async function boot() {
     }
   } else if (cloud && state.profile) {
     // First run inside Telegram with local data only → push it up.
-    ['profile', 'settings', 'clash', 'overrides', 'partner', 'theme'].forEach(save);
+    ['profile', 'settings', 'clash', 'overrides', 'partner', 'theme', 'outbox', 'notify'].forEach(save);
   }
 
   tg.on('themeChanged', () => { applyTheme(); render({ anim: false }); });
@@ -793,7 +1026,11 @@ async function boot() {
   matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => { if (state.themePref === 'auto') { applyTheme(); render({ anim: false }); } });
 
   setInterval(tick, 1000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && state.profile) render({ anim: false }); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || !state.profile) return;
+    loadShared().finally(() => render({ anim: false }));
+  });
+  setInterval(() => loadShared().then((c) => { if (c && state.profile && !state.editing) render({ anim: false }); }), 120000);
 }
 
 document.addEventListener('click', (ev) => {
@@ -806,8 +1043,35 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape' && state.sheet) closeSheet();
   if ((ev.key === 'Enter' || ev.key === ' ') && ev.target.matches('article[data-act]')) { ev.preventDefault(); ev.target.click(); }
 });
+function toast(msg) {
+  const t = document.createElement('div');
+  t.className = 'toast'; t.setAttribute('role', 'status'); t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.classList.add('out'), 3600);
+  setTimeout(() => t.remove(), 4000);
+}
+
+document.addEventListener('input', (ev) => {
+  const el = ev.target, k = el.dataset.input || '';
+  if (k.startsWith('ed.') && state.editing && el.tagName === 'INPUT') state.editing.draft[k.slice(3)] = el.value;
+});
 document.addEventListener('change', (ev) => {
   const el = ev.target;
+  const k = el.dataset.input || '';
+  if (k.startsWith('ed.') && state.editing) {
+    state.editing.draft[k.slice(3)] = el.value;
+    if (el.tagName === 'SELECT') renderSheet();
+    return;
+  }
+  if (k === 'notify.nightly') { state.notify.nightly = el.value; save('notify'); render({ anim: false }); return; }
+  if (k === 'subj') {
+    const id = el.dataset.id, name = el.value.trim();
+    if (name && name !== state.data.subjects[id].name) {
+      state.outbox.subjects[id] = { name, nick: state.data.subjects[id].nick };
+      save('outbox'); recompute(); render({ anim: false });
+    }
+    return;
+  }
   if (el.dataset.input === 'ovDate' && el.value) { state.ovDate = el.value; render({ anim: false }); }
   if (el.dataset.input === 'ovNote') {
     const o = { ...(state.settings.overrides[state.ovDate] || {}) };

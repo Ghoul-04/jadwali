@@ -42,6 +42,21 @@ Judgement calls made while building جدولي, so any of them can be revisited.
 24. If `BOT_TOKEN` or `RECIPIENTS` is missing, the script prints one line and exits 0. It never prints the token or chat IDs, only recipient indexes.
 25. A `tests.yml` workflow runs `node --test` plus a reminder dry run on every push.
 
+## Round 2 (photos, sync, notifications)
+
+30. **Photos** are cropped to 360px squares in `assets/` and shown in a hexagon (benzene) frame with a rotating gradient ring: on the picker, in the header and on سوه.
+31. **Greeting is addressed to the account owner** with gender agreement (صباحك/صباحچ خير، مساك/مساچ خير، هلا بيك/بيچ). It uses the profile name, not the Telegram name.
+32. **The evening Heat 1 tip and the track switch were removed from the Heat 1 tab** (محمد works after college). The track is still available in Settings.
+33. **Shared sync without a server.** The Mini App sends a single payload (`Telegram.WebApp.sendData`, max 4096 bytes: profile, prefs, clash choices, pending edits) to the bot. This only works when the app is opened from the bot's **keyboard button**, which the bot sends on /start. `bot/run.mjs` runs on GitHub Actions every 5 min (07:00–22:55 Baghdad). It applies the payload, then commits:
+    - `shared.json` (public: timetable edits + non-personal prefs), which both apps read from `raw.githubusercontent.com/.../state/shared.json`.
+    - `bot.enc` (AES-256-GCM, key derived from BOT_TOKEN: chat ids, prefs, offset, sent log).
+
+    Both live on a separate `state` branch, so they never trigger Pages or test runs.
+34. **Edits are operations** (`add` / `remove` / `update` / `revert`) applied after the department amendments. An `update` keeps the session key, so clash choices and per-date overrides survive. Edits show locally right away (outbox) and drop out of the outbox once the bot has applied them.
+35. **Identity**: the first chat to sync a profile claims it. Others are refused, so strangers who /start the bot can't edit the timetable.
+36. **Notifications**: default 8 PM summary of tomorrow + 15 min before each session (both configurable). The job sleeps up to 4 min to hit the exact time, dedupes through the sent log, and skips a lecture reminder once the lecture has started. GitHub cron can be a few minutes late; this is documented.
+37. The `RECIPIENTS` secret and the old nightly workflow were removed. The bot learns chat ids from the sync itself.
+
 ## Repo & security
 
 26. `.env` and `PROMPT.md` are in `.gitignore` from the first commit. `.githooks/pre-commit` scans staged files and `.githooks/pre-push` scans every pushed commit (files and message) for the token read from `.env`; either one aborts. The hooks are enabled with `git config core.hooksPath .githooks`.
