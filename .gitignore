@@ -1,0 +1,12 @@
+# Secrets — never commit
+.env
+.env.*
+PROMPT.md
+
+# Local / tooling
+node_modules/
+.claude/
+screenshots/
+*.log
+.DS_Store
+Thumbs.db

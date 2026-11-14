@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "semester": "الكورس الأول 2026–2027",
+  "department": "قسم الهندسة الكيمياوية · جامعة البصرة",
+  "timezone": "Asia/Baghdad",
+  "workdays": ["sun", "mon", "tue", "wed", "thu"],
+  "campusDay": ["08:30", "14:30"],
+  "slots": {
+    "S1": ["08:30", "10:30"],
+    "S2": ["10:30", "12:30"],
+    "S3": ["12:30", "14:30"],
+    "E1": ["14:30", "16:30"],
+    "E2": ["16:30", "18:30"],
+    "E3": ["18:30", "19:30"]
+  },
+  "profiles": {
+    "carrier":  { "name": "محمد", "gender": "m", "dropSubjects": ["control"], "addHeat1": true },
+    "standard": { "name": "خلود", "gender": "f", "dropSubjects": [], "addHeat1": false }
+  },
+  "subjects": {
+    "reactors":  { "name": "تصميم مفاعلات 1",   "nick": "مفاعلات", "symbol": "Rx" },
+    "projects":  { "name": "مشروع هندسي",       "nick": "مشاريع",  "symbol": "Pj" },
+    "units":     { "name": "الوحدات الصناعية",  "nick": "وحدات",   "symbol": "Iu" },
+    "control":   { "name": "ديناميكية العمليات", "nick": "السيطرة", "symbol": "Pc" },
+    "equipment": { "name": "تصميم معدات",       "nick": "معدات",   "symbol": "Ed" },
+    "refining":  { "name": "تكرير النفط 1",     "nick": "تكرير",   "symbol": "Pr" },
+    "heat1":     { "name": "انتقال الحرارة 1",  "nick": "هيت 1",   "symbol": "Ht" }
+  },
+  "streams": {
+    "stage4_morning": {
+      "room": "قاعة 1",
+      "sessions": [
+        { "day": "sun", "slot": "S2", "subject": "projects",  "kind": "project", "instructor": null },
+        { "day": "sun", "slot": "S3", "subject": "reactors",  "kind": "lecture", "instructor": "د. عبدالواحد" },
+        { "day": "mon", "slot": "S1", "subject": "control",   "kind": "lecture", "instructor": "ست ود" },
+        { "day": "mon", "slot": "S2", "subject": "equipment", "kind": "lecture", "instructor": "د. هيفاء" },
+        { "day": "mon", "slot": "S3", "subject": "units",     "kind": "lecture", "instructor": "د. علاء" },
+        { "day": "tue", "slot": "S1", "subject": "units",     "kind": "lab",     "instructor": "د. علاء" },
+        { "day": "tue", "slot": "S2", "subject": "units",     "kind": "lecture", "instructor": "د. علاء" },
+        { "day": "tue", "slot": "S3", "subject": "reactors",  "kind": "lecture", "instructor": "د. عبدالواحد", "id": "tue-S3-reactors" },
+        { "day": "wed", "slot": "S2", "subject": "control",   "kind": "lecture", "instructor": "ست ود" },
+        { "day": "wed", "slot": "S3", "subject": "refining",  "kind": "lecture", "instructor": "د. شيماء" },
+        { "day": "thu", "slot": "S1", "subject": "control",   "kind": "lab",     "instructor": "ست ود" },
+        { "day": "thu", "slot": "S2", "subject": "refining",  "kind": "lab",     "instructor": "د. شيماء" },
+        { "day": "thu", "slot": "S3", "subject": "equipment", "kind": "lecture", "instructor": "د. هيفاء" }
+      ],
+      "amendments": [
+        { "op": "add",    "session": { "day": "sun", "slot": "S1", "subject": "reactors", "kind": "lecture", "instructor": "د. عبدالواحد" }, "note": "تعديل القسم" },
+        { "op": "remove", "id": "tue-S3-reactors", "note": "تعديل القسم: الثلاثاء ماكو مفاعلات" }
+      ]
+    },
+    "stage4_evening": {
+      "room": "قاعة 1",
+      "sessions": [
+        { "day": "sun", "slot": "E1", "subject": "units",     "kind": "lecture", "instructor": "د. علاء" },
+        { "day": "sun", "slot": "E2", "subject": "units",     "kind": "lecture", "instructor": "د. علاء" },
+        { "day": "sun", "slot": "E3", "subject": "units",     "kind": "lab",     "instructor": "د. علاء" },
+        { "day": "mon", "slot": "E1", "subject": "reactors",  "kind": "lecture", "instructor": "د. عبدالواحد" },
+        { "day": "mon", "slot": "E2", "subject": "reactors",  "kind": "lecture", "instructor": "د. عبدالواحد" },
+        { "day": "tue", "slot": "E1", "subject": "control",   "kind": "lecture", "instructor": null },
+        { "day": "tue", "slot": "E2", "subject": "control",   "kind": "lab",     "instructor": null },
+        { "day": "tue", "slot": "E3", "subject": "projects",  "kind": "project", "instructor": null },
+        { "day": "wed", "slot": "E1", "subject": "refining",  "kind": "lab",     "instructor": "د. شيماء" },
+        { "day": "wed", "slot": "E2", "subject": "refining",  "kind": "lecture", "instructor": "د. شيماء" },
+        { "day": "thu", "slot": "E1", "subject": "equipment", "kind": "lecture", "instructor": "د. هيفاء" },
+        { "day": "thu", "slot": "E2", "subject": "equipment", "kind": "lecture", "instructor": "د. هيفاء" }
+      ],
+      "amendments": []
+    },
+    "heat1_morning": {
+      "room": "قاعة 4",
+      "fromStage": "المرحلة الثالثة",
+      "sessions": [
+        { "day": "sun", "slot": "S1", "subject": "heat1", "kind": "lecture", "instructor": "أستاذ أحمد" },
+        { "day": "thu", "slot": "S1", "subject": "heat1", "kind": "lecture", "instructor": "أستاذ أحمد" },
+        { "day": "thu", "slot": "S2", "subject": "heat1", "kind": "lab",     "instructor": "أستاذ أحمد", "labGroup": "A" },
+        { "day": "thu", "slot": "S3", "subject": "heat1", "kind": "lab",     "instructor": "أستاذ أحمد", "labGroup": "B" }
+      ]
+    },
+    "heat1_evening": {
+      "room": "قاعة 4",
+      "fromStage": "المرحلة الثالثة",
+      "sessions": [
+        { "day": "tue", "slot": "E1", "subject": "heat1", "kind": "lab",     "instructor": "م. أحمد" },
+        { "day": "tue", "slot": "E2", "subject": "heat1", "kind": "lecture", "instructor": "م. أحمد" },
+        { "day": "tue", "slot": "E3", "subject": "heat1", "kind": "lecture", "instructor": "م. أحمد" }
+      ]
+    }
+  }
+}

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Abort the commit if the bot token (read from the local .env) appears in any staged file.
+. "$(dirname "$0")/token-guard.sh"
+
+TOKEN=$(read_token)
+[ -z "$TOKEN" ] && exit 0
+
+if git diff --cached --name-only -z --diff-filter=ACMR | xargs -0 -r git grep --cached -l -F -e "$TOKEN" -- 2>/dev/null | grep -q .; then
+  echo "✖ pre-commit: the bot token was found in staged files. Commit aborted." >&2
+  exit 1
+fi
+exit 0
