@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
   buildWeek, nowInfo, defaultView, nextHeat, together, heatTip, dayPlan,
   zonedNow, durationAr, time12, planText, freeWindows, minToHHMM, weekStart,
-  applyShared, streamFor, plannedNotifications, zonedEpoch,
+  applyShared, streamFor, zonedEpoch,
 } from '../core/schedule.js';
 
 const data = JSON.parse(readFileSync(new URL('../data/schedule.json', import.meta.url), 'utf8'));
@@ -207,17 +207,7 @@ test('shared edits: update, remove, add and subject rename (both profiles see th
   assert.equal(streamFor({ subject: 'units', slot: 'E1' }, DEF), 'stage4_evening');
 });
 
-test('notifications: 8 PM summary of tomorrow + 15 min before each lecture', () => {
-  const sat = plannedNotifications(data, 'carrier', DEF, { nightly: '20', lead: 15 }, at('2026-11-14T19:00'));
-  assert.deepEqual(sat.map((n) => n.kind), ['summary']);
-  assert.equal(sat[0].at, at('2026-11-14T20:00').getTime());
-  assert.equal(sat[0].plan.dateStr, '2026-11-15');
-  const mon = plannedNotifications(data, 'carrier', DEF, { nightly: '20', lead: 15 }, at('2026-11-16T07:00'));
-  assert.deepEqual(mon.filter((n) => n.kind === 'lead').map((n) => n.at), [at('2026-11-16T10:15').getTime(), at('2026-11-16T12:15').getTime()]);
-  const thu = plannedNotifications(data, 'carrier', DEF, { nightly: '20', lead: 0 }, at('2026-11-19T07:00'));
-  assert.equal(thu.length, 0); // Friday tomorrow → no summary, lead off
-  const morning = plannedNotifications(data, 'standard', DEF, { nightly: '7', lead: 0 }, at('2026-11-15T06:00'));
-  assert.equal(morning[0].when, 'today');
+test('zonedEpoch maps Baghdad wall time to the right instant', () => {
   assert.equal(zonedEpoch('2026-11-15', 8 * 60 + 30), Date.parse('2026-11-15T05:30:00Z'));
 });
 

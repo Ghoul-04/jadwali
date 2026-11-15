@@ -1,28 +1,25 @@
-// bot/run.mjs — the whole "server", run every ~5 minutes by GitHub Actions (Node 20, no dependencies).
+// bot/run.mjs — sync only, run by GitHub Actions (Node 20, no dependencies).
+// Reminders live inside the Mini App; this job never sends scheduled messages.
 //  1. Reads new bot updates (getUpdates): /start → welcome + keyboard button; web_app_data → sync
-//     (who is who, notification prefs, shared timetable edits).
-//  2. Sends due notifications (schedule summary + N minutes before each session).
-//  3. Persists state in STATE_DIR (a checkout of the repo's `state` branch):
+//     (who is who, partner-visible prefs, shared timetable edits) + a confirmation reply.
+//  2. Persists state in STATE_DIR (a checkout of the repo's `state` branch):
 //       shared.json — public: timetable edits + non-personal prefs, read by the Mini App
-//       bot.enc     — private: chat ids, prefs, update offset, sent log (AES-256-GCM, key derived from BOT_TOKEN)
+//       bot.enc     — private: chat ids, update offset (AES-256-GCM, key derived from BOT_TOKEN)
 // Never logs the token or chat ids.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { createHash, createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import {
-  applyShared, plannedNotifications, activeEntries, daySummary, DAY_NAMES, KIND_NAMES, time12Str, withDefaults,
-} from '../core/schedule.js';
+import { applyShared, DAY_NAMES, KIND_NAMES, time12Str } from '../core/schedule.js';
 
 const BASE = JSON.parse(readFileSync(new URL('../data/schedule.json', import.meta.url), 'utf8'));
-const MONTHS = ['كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار', 'حزيران', 'تموز', 'آب', 'أيلول', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول'];
 const esc = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 const str = (v, n) => (typeof v === 'string' ? v.trim().slice(0, n) : null);
 
 // ───────── state ─────────
 export function emptyShared() { return { version: 1, updatedAt: null, subjects: {}, edits: [], people: {} }; }
-export function emptyPrivate() { return { offset: 0, users: {}, claims: {}, sent: {} }; }
+export function emptyPrivate() { return { offset: 0, users: {}, claims: {} }; }
 
 const keyFrom = (token) => createHash('sha256').update(`jadwali-state|${token}`).digest();
 export function encrypt(obj, token) {
@@ -36,39 +33,6 @@ export function decrypt(b64, token) {
   const d = createDecipheriv('aes-256-gcm', keyFrom(token), buf.subarray(0, 12));
   d.setAuthTag(buf.subarray(12, 28));
   return JSON.parse(Buffer.concat([d.update(buf.subarray(28)), d.final()]).toString('utf8'));
-}
-
-// ───────── messages ─────────
-const dateLabel = (ds) => { const [, m, d] = ds.split('-').map(Number); return `${d} ${MONTHS[m - 1]}`; };
-const leadText = (n) => (n === 15 ? 'ربع ساعة' : n === 30 ? 'نص ساعة' : `${n} دقايق`);
-
-export function summaryText(data, plan, g, when) {
-  const you = g === 'f' ? 'عندچ' : 'عندك';
-  const lines = [`${when === 'today' ? '☀️' : '🌙'} <b>شنو ${you} ${when === 'today' ? 'اليوم' : 'باجر'}؟</b>`, `${DAY_NAMES[plan.dayKey]} ${dateLabel(plan.dateStr)}`, ''];
-  for (const e of activeEntries(plan)) {
-    const t = `${time12Str(e.start)} – ${time12Str(e.end)}`;
-    const live = e.sessions.filter((x) => x.attending && !x.cancelled);
-    if (live.length > 1) {
-      lines.push(`⚠️ <b>${t}</b> — تصادم:`);
-      for (const x of live) lines.push(`   • ${esc(data.subjects[x.subject].nick)} (${KIND_NAMES[x.kind]})${x.labGroup ? ` كروب ${x.labGroup}` : ''} · ${esc(x.location)}`);
-    } else {
-      const x = live[0];
-      const icon = x.subject === 'heat1' ? '🔥' : x.kind === 'lab' ? '🧪' : '📘';
-      lines.push(`${icon} <b>${t}</b>\n   ${esc(data.subjects[x.subject].name)} · ${KIND_NAMES[x.kind]} · ${esc(x.location)}${x.instructor ? ` · ${esc(x.instructor)}` : ''}`);
-    }
-  }
-  const sm = daySummary(plan);
-  if (sm) lines.push('', `⏰ أول محاضرة ${time12Str(sm.first)} · تخلص ${time12Str(sm.last)}`);
-  if (sm?.clashes) lines.push(g === 'f' ? '⚠️ عندچ تصادم، افتحي التطبيق واختاري وين رايحة.' : '⚠️ عندك تصادم، افتح التطبيق واختار وين رايح.');
-  return lines.join('\n');
-}
-
-export function leadMessage(data, entry, lead) {
-  const live = entry.sessions.filter((x) => x.attending && !x.cancelled);
-  const t = time12Str(entry.start);
-  if (live.length > 1) return `⏰ <b>بعد ${leadText(lead)}</b> (${t}) — ⚠️ تصادم: ${live.map((x) => esc(data.subjects[x.subject].nick)).join(' ✕ ')}`;
-  const x = live[0];
-  return `⏰ <b>بعد ${leadText(lead)}</b>: ${esc(data.subjects[x.subject].name)}\n${KIND_NAMES[x.kind]} · ${esc(x.location)} · ${t}${x.instructor ? ` · ${esc(x.instructor)}` : ''}`;
 }
 
 // ───────── sync (pure: easy to test) ─────────
@@ -133,8 +97,6 @@ export function processUpdates(updates, priv, shared, appUrl) {
         shift: pr.shift === 'evening' ? 'evening' : 'morning',
         heatTrack: pr.heatTrack === 'evening' ? 'evening' : 'morning',
         labGroup: ['A', 'B', 'both', 'unknown'].includes(pr.labGroup) ? pr.labGroup : 'unknown',
-        nightly: ['off', '7', '19', '20', '21', '22'].includes(String(pr.nightly)) ? String(pr.nightly) : '20',
-        lead: [0, 10, 15, 30].includes(Number(pr.lead)) ? Number(pr.lead) : 15,
         clash: Object.fromEntries(Object.entries(pr.clash || {}).filter(([k, v]) => /^[a-z]{3}@\d\d:\d\d$/.test(k) && typeof v === 'string' && v.length < 80).slice(0, 20)),
       };
       priv.users[chat] = { profile, prefs, name: str(m.from?.first_name, 30) || '' };
@@ -161,16 +123,15 @@ export function processUpdates(updates, priv, shared, appUrl) {
       }
       shared.edits = shared.edits.slice(-300);
 
-      const n = prefs.nightly === 'off' ? 'رسالة الجدول مطفية' : prefs.nightly === '7' ? 'جدول اليوم الساعة 7 الصبح' : `جدول باجر الساعة ${Number(prefs.nightly) - 12} بالليل`;
-      const l = prefs.lead ? `وقبل كل محاضرة بـ${leadText(prefs.lead)}` : 'وبدون تنبيه قبل المحاضرات';
+      const fr = BASE.profiles[profile].emoji || '';
       out.push({
         chat_id: chat,
-        text: `✅ <b>${g === 'f' ? 'انحفظ يا ' : 'انحفظ يا '}${esc(BASE.profiles[profile].name)}</b>\n🔔 ${n}، ${l}.${applied.length ? `\n\n${applied.map(esc).join('\n')}` : ''}`,
+        text: `✅ <b>انحفظ يا ${esc(BASE.profiles[profile].name)}</b> ${fr}${applied.length ? `\n\n${applied.map(esc).join('\n')}` : '\nكل شي متزامن.'}`,
         reply_markup: keyboard,
       });
       const partner = priv.claims[profile === 'carrier' ? 'standard' : 'carrier'];
       if (applied.length && partner) {
-        out.push({ chat_id: partner, text: `✏️ <b>${esc(BASE.profiles[profile].name)} ${g === 'f' ? 'عدّلت' : 'عدّل'} الجدول</b> (وصل عندك هم):\n${applied.slice(0, 8).map(esc).join('\n')}` });
+        out.push({ chat_id: partner, text: `✏️ ${fr} <b>${esc(BASE.profiles[profile].name)} ${g === 'f' ? 'عدّلت' : 'عدّل'} الجدول</b> (وصل عندك هم):\n${applied.slice(0, 8).map(esc).join('\n')}` });
       }
       shared.updatedAt = new Date().toISOString();
       continue;
@@ -182,35 +143,12 @@ export function processUpdates(updates, priv, shared, appUrl) {
         chat_id: chat,
         text: known
           ? 'دوس زر «📅 جدولي» اللي تحت 👇'
-          : 'هلا 👋 هذا «شنو باجر» — جدولكم بالكلية.\n\n1) دوس زر <b>«📅 جدولي»</b> اللي تحت 👇\n2) اختار صورتك\n3) من ⚙️ الإعدادات دوس <b>«احفظ ودزها للبوت»</b> حتى توصلك التنبيهات وتتزامن التعديلات.',
+          : 'هلا 👋 هذا «شنو باجر» — جدولكم بالكلية.\n\n1) دوس زر <b>«📅 جدولي»</b> اللي تحت 👇\n2) اختار فاكهتك 🐉🍑\n3) التذكيرات كلها داخل التطبيق (🔔 فوق).',
         reply_markup: keyboard,
       });
     }
   }
   return out;
-}
-
-/** Notifications due now for every registered user. */
-export function dueNotifications(priv, shared, now = new Date()) {
-  const data = applyShared(BASE, shared);
-  const t = now.getTime();
-  const due = [];
-  for (const [chat, u] of Object.entries(priv.users)) {
-    if (!BASE.profiles[u.profile] || priv.claims[u.profile] !== chat) continue;
-    const settings = withDefaults({ ...u.prefs, clashChoices: u.prefs.clash || {} });
-    for (const n of plannedNotifications(data, u.profile, settings, u.prefs, now)) {
-      const id = `${chat}|${n.id}`;
-      if (priv.sent[id]) continue;
-      const late = n.kind === 'lead' ? t >= n.startAt : t - n.at > 45 * 60e3;
-      if (n.at > t + 4 * 60e3 || late) continue;
-      const g = BASE.profiles[u.profile].gender;
-      due.push({
-        id, at: n.at, chat_id: chat,
-        text: n.kind === 'summary' ? summaryText(data, n.plan, g, n.when) : leadMessage(data, n.entry, u.prefs.lead),
-      });
-    }
-  }
-  return due.sort((a, b) => a.at - b.at);
 }
 
 // ───────── I/O ─────────
@@ -242,23 +180,9 @@ async function main() {
     try { await tg(token, 'sendMessage', { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, ...m }); sent++; } catch (e) { console.log(`reply failed: ${e.message}`); }
   }
   console.log(`updates: ${updates.length}, replies: ${sent}`);
+  delete priv.sent; // leftover from the old notification log
 
-  // 2) notifications (sleep briefly for ones due within the next few minutes)
-  const inline = appUrl ? { inline_keyboard: [[{ text: '📅 افتح جدولي', web_app: { url: appUrl } }]] } : undefined;
-  let notified = 0;
-  for (const n of dueNotifications(priv, shared)) {
-    const wait = n.at - Date.now();
-    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-    try {
-      await tg(token, 'sendMessage', { chat_id: n.chat_id, text: n.text, parse_mode: 'HTML', reply_markup: inline });
-      priv.sent[n.id] = Date.now(); notified++;
-    } catch (e) { console.log(`notify failed: ${e.message}`); }
-  }
-  const cutoff = Date.now() - 3 * 86400e3;
-  for (const [k, v] of Object.entries(priv.sent)) if (v < cutoff) delete priv.sent[k];
-  console.log(`notifications sent: ${notified}`);
-
-  // 3) persist only when something changed
+  // 2) persist only when something changed
   if (JSON.stringify([shared, priv]) !== before) {
     writeFileSync(sharedPath, JSON.stringify(shared, null, 1) + '\n');
     writeFileSync(privPath, encrypt(priv, token) + '\n');

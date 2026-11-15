@@ -491,10 +491,7 @@ function fakeDate(dayKey) {
   return addDays('2026-11-15', DAY_KEYS.indexOf(dayKey));
 }
 
-// ───────────────────────── notifications ─────────────────────────
-
-/** nightly: 'off' | hour as string ('7' = morning summary of today; 19–22 = tomorrow's schedule). lead: minutes before a session (0 = off). */
-export const NOTIFY_DEFAULTS = { nightly: '20', lead: 15 };
+// ───────────────────────── epochs ─────────────────────────
 
 /** Wall-clock time in `tz` → epoch ms (offset derived from Intl, so it works on any machine). */
 export function zonedEpoch(dateStr, minutes, tz = 'Asia/Baghdad') {
@@ -503,33 +500,6 @@ export function zonedEpoch(dateStr, minutes, tz = 'Asia/Baghdad') {
   const z = zonedNow(new Date(guess), tz);
   const asUTC = Date.UTC(z.y, z.mo - 1, z.d, 0, z.minutes, z.seconds);
   return guess - (asUTC - guess);
-}
-
-/** Notifications that belong to the current Baghdad day for one user. */
-export function plannedNotifications(data, profileId, settings, prefs, now = new Date()) {
-  const p = { ...NOTIFY_DEFAULTS, ...(prefs || {}) };
-  const z = zonedNow(now, data.timezone);
-  const week = buildWeek(data, profileId, settings);
-  const out = [];
-  if (p.nightly && p.nightly !== 'off') {
-    const h = Number(p.nightly);
-    const target = h < 12 ? z.dateStr : addDays(z.dateStr, 1);
-    const plan = dayPlan(data, profileId, settings, target, week);
-    if (plan.workday && !plan.holiday && activeEntries(plan).length) {
-      out.push({ id: `n|${z.dateStr}|${h}`, kind: 'summary', at: zonedEpoch(z.dateStr, h * 60, data.timezone), plan, when: h < 12 ? 'today' : 'tomorrow' });
-    }
-  }
-  if (Number(p.lead) > 0) {
-    const plan = dayPlan(data, profileId, settings, z.dateStr, week);
-    for (const e of activeEntries(plan)) {
-      out.push({
-        id: `l|${z.dateStr}|${e.start}`, kind: 'lead', entry: e, plan,
-        at: zonedEpoch(z.dateStr, e.start - Number(p.lead), data.timezone),
-        startAt: zonedEpoch(z.dateStr, e.start, data.timezone),
-      });
-    }
-  }
-  return out.sort((a, b) => a.at - b.at);
 }
 
 // ───────────────────────── sharing / text ─────────────────────────

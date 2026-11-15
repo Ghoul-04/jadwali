@@ -1,10 +1,11 @@
 name: Bot
 
-# The bot has no server: this job runs every 5 minutes from 07:00 to 22:55 Baghdad (04:00–19:55 UTC).
-# It reads what the Mini App synced, replies, and sends due notifications.
+# Sync only (reminders live inside the Mini App). The bot has no server: this job reads what the
+# Mini App synced through the keyboard button, replies, and publishes shared edits to the `state` branch.
+# GitHub runs frequent schedules irregularly, so a sync can take from minutes to hours to arrive.
 on:
   schedule:
-    - cron: '*/5 4-19 * * *'
+    - cron: '*/10 4-19 * * *'
   workflow_dispatch:
 
 permissions:

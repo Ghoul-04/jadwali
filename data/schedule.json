@@ -14,8 +14,8 @@
     "E3": ["18:30", "19:30"]
   },
   "profiles": {
-    "carrier":  { "name": "محمد", "gender": "m", "photo": "assets/mohammed.jpg", "dropSubjects": ["control"], "addHeat1": true },
-    "standard": { "name": "خلود", "gender": "f", "photo": "assets/kholoud.jpg", "dropSubjects": [], "addHeat1": false }
+    "carrier":  { "name": "محمد", "gender": "m", "photo": "assets/mohammed.jpg", "fruit": "dragon", "emoji": "🐉", "dropSubjects": ["control"], "addHeat1": true },
+    "standard": { "name": "خلود", "gender": "f", "photo": "assets/kholoud.jpg", "fruit": "peach", "emoji": "🍑", "dropSubjects": [], "addHeat1": false }
   },
   "subjects": {
     "reactors":  { "name": "تصميم مفاعلات 1",   "nick": "مفاعلات", "symbol": "Rx" },
@@ -26,6 +26,13 @@
     "refining":  { "name": "تكرير النفط 1",     "nick": "تكرير",   "symbol": "Pr" },
     "heat1":     { "name": "انتقال الحرارة 1",  "nick": "هيت 1",   "symbol": "Ht" }
   },
+  "exams": [
+    { "id": "mid-equipment", "kind": "midterm", "subject": "equipment", "date": "2026-11-16", "time": null },
+    { "id": "mid-control",   "kind": "midterm", "subject": "control",   "date": "2026-11-19", "time": "09:00" },
+    { "id": "mid-reactors",  "kind": "midterm", "subject": "reactors",  "date": "2026-11-22", "time": null },
+    { "id": "mid-refining",  "kind": "midterm", "subject": "refining",  "date": "2026-11-25", "time": null },
+    { "id": "mid-units",     "kind": "midterm", "subject": "units",     "date": "2026-12-01", "time": null }
+  ],
   "streams": {
     "stage4_morning": {
       "room": "قاعة 1",

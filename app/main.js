@@ -1,5 +1,7 @@
 // app/main.js — bootstrap, state, rendering of all screens.
 import * as S from '../core/schedule.js';
+import * as X from '../core/exams.js';
+import { fruitSVG } from './fruits.js';
 import { tg, inTelegram, atLeast, canSendData } from './telegram.js';
 import { storage, pruneOverrides } from './storage.js';
 import { voice, dateLabel, greetingFor, countSessions, countClashes } from './i18n.js';
@@ -23,7 +25,12 @@ const state = {
   base: null,                   // data/schedule.json as shipped
   shared: null,                 // synced edits + people (from the state branch)
   outbox: { edits: [], subjects: {} }, // local edits not yet confirmed by the bot
-  notify: { nightly: '20', lead: 15 },
+  examLog: {},                  // { [examId]: { r: reaction, g: grade } }
+  midDone: false,               // end-of-midterms celebration shown
+  seen: [],                     // in-app reminder ids already seen
+  inbox: false,                 // reminders sheet open
+  react: null,                  // exam id for "شلون كان الامتحان؟"
+  asked: false,                 // asked about an exam this session
   dirty: false,                 // something to sync
   editing: null,                // edit-sheet draft
   editDay: null,
@@ -113,7 +120,9 @@ function applyStored(st) {
   if (st.partner) Object.assign(state.partner, st.partner);
   if (st.theme) state.themePref = st.theme;
   if (st.outbox?.edits) state.outbox = { edits: st.outbox.edits, subjects: st.outbox.subjects || {} };
-  if (st.notify) Object.assign(state.notify, st.notify);
+  if (st.examLog && typeof st.examLog === 'object') state.examLog = st.examLog;
+  if (typeof st.midDone === 'boolean') state.midDone = st.midDone;
+  if (Array.isArray(st.seen)) state.seen = st.seen;
   if (typeof st.dirty === 'boolean') state.dirty = st.dirty;
 }
 function pick(o, keys) { const r = {}; for (const k of keys) if (o[k] !== undefined) r[k] = o[k]; return r; }
@@ -130,9 +139,11 @@ function save(what) {
   if (what === 'partner') storage.set('partner', state.partner);
   if (what === 'theme') storage.set('theme', state.themePref);
   if (what === 'outbox') storage.set('outbox', state.outbox);
-  if (what === 'notify') storage.set('notify', state.notify);
-  // Anything the bot or the other person needs to know makes the app "dirty" until synced.
-  if (['profile', 'settings', 'clash', 'outbox', 'notify'].includes(what) && !state.dirty) { state.dirty = true; storage.set('dirty', true); }
+  if (what === 'examLog') storage.set('examLog', state.examLog);
+  if (what === 'midDone') storage.set('midDone', state.midDone);
+  if (what === 'seen') storage.set('seen', state.seen.slice(-60));
+  // Anything the other person needs to know makes the app "dirty" until synced.
+  if (['profile', 'settings', 'clash', 'outbox'].includes(what) && !state.dirty) { state.dirty = true; storage.set('dirty', true); }
 }
 
 // ───────── theme ─────────
@@ -176,7 +187,7 @@ function render({ anim = true } = {}) {
   const view = $('#view');
   view.classList.toggle('no-anim', !anim);
   view.dataset.tab = state.sub || state.tab;
-  view.innerHTML = state.sub === 'settings' ? viewSettingsPage() : VIEWS[state.tab]();
+  view.innerHTML = state.sub === 'settings' ? viewSettingsPage() : state.sub === 'exams' ? viewExamsPage() : VIEWS[state.tab]();
   view.querySelectorAll('.rise').forEach((el, k) => el.style.setProperty('--i', k));
   if (anim) { view.classList.remove('enter'); void view.offsetWidth; view.classList.add('enter'); }
   syncBack();
@@ -186,13 +197,15 @@ function render({ anim = true } = {}) {
 
 function renderTop() {
   const z = Z();
-  const meName = prof(state.profile).name;
-  const otherName = prof(other(state.profile)).name;
-  const g = prof(state.profile).gender;
+  const me = state.profile, you = other(me);
+  const meName = prof(me).name;
+  const otherName = prof(you).name;
+  const g = prof(me).gender;
+  const unseen = inboxItems().filter((i) => !state.seen.includes(i.id)).length;
   $('#top').innerHTML = `
     <div class="top-row">
       <div class="hello">
-        ${avatar(state.profile, 'sm')}
+        <button class="ava-btn" data-act="wobble" aria-label="${esc(meName)}">${avatar(me, 'sm')}</button>
         <div class="hello-txt">
           <span class="hello-k">${greetingFor(z.minutes, g)}</span>
           <h1 class="hello-n">${esc(meName)}</h1>
@@ -200,11 +213,13 @@ function renderTop() {
         </div>
       </div>
       <div class="top-actions">
-        ${state.sub ? '' : `<button class="chip-btn ${state.peek ? 'on' : ''}" data-act="peek" aria-pressed="${state.peek}">${icons.eye()}<span>${state.peek ? 'جدولي' : `جدول ${esc(otherName)}`}</span></button>`}
+        ${state.sub ? '' : `
+        <button class="icon-btn bell ${unseen ? 'has' : ''}" data-act="openInbox" aria-label="التذكيرات${unseen ? ` (${unseen} جديدة)` : ''}">${icons.bell()}${unseen ? `<i class="badge">${unseen}</i>` : ''}</button>
+        <button class="icon-btn fruit-btn ${state.peek ? 'on' : ''}" data-act="peek" aria-pressed="${state.peek}" aria-label="${state.peek ? 'جدولي' : `جدول ${esc(otherName)}`}">${fruitSVG(fruitOf(state.peek ? me : you), 34)}</button>`}
         <button class="icon-btn" data-act="${state.sub ? 'closeSub' : 'openSettings'}" aria-label="${state.sub ? 'رجوع' : 'الإعدادات'}">${state.sub ? icons.close() : icons.gear()}</button>
       </div>
     </div>
-    ${state.peek && !state.sub ? `<div class="peek-bar">${icons.eye()}<span>دتشوف جدول <b>${esc(otherName)}</b> · ما يتغير اختيارك</span><button class="link" data-act="peek">رجوع لجدولي</button></div>` : ''}`;
+    ${state.peek && !state.sub ? `<div class="peek-bar">${fruitSVG(fruitOf(you), 22)}<span>جدول <b>${esc(otherName)}</b> · ما يتغير اختيارك</span><button class="link" data-act="peek">رجوع لجدولي</button></div>` : ''}`;
 }
 
 function renderTabs() {
@@ -222,19 +237,26 @@ function renderTabs() {
 
 function syncBack() {
   if (state.editing) tg.back.show(() => act.editClose());
+  else if (state.react) tg.back.show(() => act.closeReact());
+  else if (state.inbox) tg.back.show(() => act.closeInbox());
   else if (state.sheet) tg.back.show(() => closeSheet());
   else if (state.sub) tg.back.show(() => act.closeSub());
   else if (state.peek) tg.back.show(() => act.peek());
   else tg.back.hide();
 }
 
-/** Hexagon-framed photo (benzene ring) with an animated gradient ring. */
+const fruitOf = (id) => prof(id).fruit || (id === 'carrier' ? 'dragon' : 'peach');
+const AVA_PX = { xs: 22, sm: 46, md: 56, xl: 116 };
+
+/** Profile avatar = their fruit, on a soft glowing halo. */
 function avatar(id, size = 'md') {
+  return `<span class="ava ava--${size} ava-${fruitOf(id)}" aria-hidden="true"><span class="ava-halo"></span>${fruitSVG(fruitOf(id), AVA_PX[size] || 56)}</span>`;
+}
+
+/** Small hexagon photo (benzene ring), used as a badge on the picker. */
+function photoBadge(id) {
   const p = prof(id);
-  return `<span class="ava ava--${size} ${id === 'carrier' ? 'ava-m' : 'ava-f'}" aria-hidden="true">
-    <span class="ava-ring"></span>
-    <span class="ava-img"><b>${esc(p.name[0])}</b>${p.photo ? `<img src="${esc(p.photo)}" alt="" decoding="async" onerror="this.remove()">` : ''}</span>
-  </span>`;
+  return p.photo ? `<span class="ava-photo" aria-hidden="true"><span class="ava-ring"></span><span class="ava-img"><img src="${esc(p.photo)}" alt="" decoding="async" onerror="this.parentNode.parentNode.remove()"></span></span>` : '';
 }
 
 // ───────── entries ─────────
@@ -277,6 +299,64 @@ function summaryLine(plan) {
   const parts = [countSessions(sm.count), `من ${t12(sm.first)} لـ ${t12(sm.last)}`];
   if (sm.clashes) parts.push(`<b class="warn">${countClashes(sm.clashes)}</b>`);
   return `<p class="summary rise">${parts.join('<span class="dot">•</span>')}</p>`;
+}
+
+// ───────── exams ─────────
+const REACTIONS = [['easy', '😎', 'سهل'], ['good', '🙂', 'زين'], ['hard', '😬', 'صعب شوية'], ['rip', '🫠', 'ذبحني']];
+const reactionOf = (id) => REACTIONS.find((r) => r[0] === state.examLog[id]?.r);
+const shortDate = (ds) => `${Number(ds.slice(8))}/${Number(ds.slice(5, 7))}`;
+function daysCount(n) { return n === 1 ? 'يوم واحد' : n === 2 ? 'يومين' : n <= 10 ? `${n} أيام` : `${n} يوم`; }
+
+/** Calm, focused exam card: night-ink sky, a slowly breathing orb around the element tile. */
+function examCard(e, { when, luck = '' } = {}) {
+  const d = state.data, sub = d.subjects[e.subject];
+  const startEpoch = e.start != null ? epochAt(e.date, e.start) : null;
+  const left = startEpoch ? (startEpoch - now().getTime()) / 1000 : null;
+  return `<section class="exam-card s-${e.subject} rise" data-act="openExams" role="button" tabindex="0" aria-label="امتحان ${esc(sub.name)} ${esc(when)}">
+    <div class="exam-sky" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="exam-orb" aria-hidden="true"><span class="orb-ring"></span><span class="orb-ring r2"></span>${tile(d, e.subject, { size: 'lg' })}</div>
+    <div class="exam-body">
+      <span class="exam-k">${icons.pencil()}<span>امتحان المد · ${esc(when)}</span></span>
+      <h2>${esc(sub.name)}</h2>
+      <p class="exam-time">${e.start != null ? t12(e.start) : '<span class="muted">الوقت ما متبلغ بعد</span>'}</p>
+      ${left != null && left > 0 && left < 2 * 86400 ? `<p class="exam-count"><b data-until="${startEpoch}">${U.clock(left)}</b><small>للبداية</small></p>` : ''}
+      ${luck ? `<p class="exam-luck">${esc(luck)}</p>` : ''}
+    </div>
+    <p class="breathe" aria-hidden="true"><span>شهيق…</span><span>زفير…</span></p>
+  </section>`;
+}
+
+/** Exam-season countdown banner (hidden once the last exam is over). */
+function examBanner({ skipDate = null } = {}) {
+  const d = state.data;
+  const tl = X.examTimeline(d, viewId(), now());
+  if (!tl.season) return '';
+  const e = tl.list.find((x) => !x.done && x.date !== skipDate);
+  if (!e) return '';
+  const focus = state.peek ? null : X.focusSuggestion(d, viewId(), now());
+  const done = tl.list.filter((x) => x.done).length;
+  const big = e.dayDiff <= 0 ? 'اليوم' : e.dayDiff === 1 ? 'باجر' : e.dayDiff === 2 ? 'يومين' : String(e.dayDiff);
+  return `<button class="exam-banner s-${e.subject} rise" data-act="openExams" aria-label="امتحانات المد">
+    ${tile(d, e.subject, { size: 'sm' })}
+    <span class="eb-txt"><b>امتحان ${esc(X.examNick(d, e.subject))}</b>
+      <small>${X.dayWord(e.dayDiff, e.dayKey)}${e.dayDiff >= 2 ? ` ${shortDate(e.date)}` : ''} · ${esc(X.examTimeText(e))}</small>
+      ${focus ? `<small class="eb-focus">${icons.sparkle()}ركّز اليوم على ${esc(X.examNick(d, focus.exam.subject))}</small>` : ''}</span>
+    <span class="eb-count ${big.length > 2 ? 'word' : ''}"><b>${big}</b>${e.dayDiff >= 3 ? `<small>${e.dayDiff <= 10 ? 'أيام' : 'يوم'}</small>` : ''}</span>
+    <span class="eb-progress" style="--p:${(done / tl.list.length).toFixed(3)}" aria-hidden="true"></span>
+  </button>`;
+}
+
+/** The other person's exams today/tomorrow, with their fruit. */
+function partnerBrief() {
+  const b = X.examBrief(state.data, viewId(), now());
+  return b.lines.filter((l) => l.kind === 'partner').map((l) => `<div class="brief rise">${fruitSVG(fruitOf(other(viewId())), 26)}<span>${esc(noEmoji(l.text))}</span></div>`).join('');
+}
+
+/** Drop the trailing fruit emoji when the drawn fruit is already shown next to the text. */
+const noEmoji = (s) => String(s).replace(/\s*(🍑|🐉)$/u, '');
+
+function luckFor(e) {
+  return state.peek ? '' : X.luckLine(prof(viewId()).gender, `${e.date}|${e.id}`);
 }
 
 // ───────── views ─────────
@@ -344,7 +424,11 @@ const VIEWS = {
     } else {
       rest = `<div class="empty rise">${icons.coffee()}<b>اليوم ${S.DAY_NAMES[z.dayKey]}، عطلة</b><span>${v.rest}</span></div>`;
     }
-    return `${hero}${planExtras(n.plan)}${rest}`;
+    // Exam day: the exam is the top card. Otherwise the season banner.
+    const todays = X.examTimeline(d, viewId(), now()).list.filter((e) => e.date === z.dateStr && !e.done);
+    const g = prof(viewId()).gender;
+    const examTop = todays.map((e) => examCard(e, { when: 'اليوم', luck: state.peek ? '' : `بالتوفيق، ${g === 'f' ? 'أنتِ' : 'أنت'} قدها 💪` })).join('');
+    return `${examTop}${examBanner({ skipDate: todays.length ? z.dateStr : null })}${partnerBrief()}${hero}${planExtras(n.plan)}${rest}`;
   },
 
   tomorrow() {
@@ -366,6 +450,13 @@ const VIEWS = {
       plan = S.dayPlan(d, viewId(), viewSettings(), preview);
       title = `${S.DAY_NAMES[plan.dayKey]} الجاي`;
     }
+    // The exam of that day goes on top; otherwise the season banner.
+    const exams = X.examsOn(d, viewId(), plan.dateStr);
+    const when = plan.dateStr === tdate ? 'باجر' : S.DAY_NAMES[plan.dayKey];
+    const top = exams.map((e) => examCard({ ...e, dayDiff: X.daysBetween(z.dateStr, e.date) }, { when, luck: luckFor(e) })).join('');
+    if (plan === tPlan) html = html.replace('</header>', `</header>${top}`);
+    else html += top;
+    html += exams.length ? partnerBrief() : examBanner() + partnerBrief();
     html += summaryLine(plan);
     html += planExtras(plan);
     html += plan.entries.length ? timeline(plan) : `<div class="empty rise">${icons.coffee()}<b>${v.noClass}</b></div>`;
@@ -517,6 +608,11 @@ const VIEWS = {
           : '<p class="hint">ماكو وكت فاضي مشترك هالأسبوع ضمن الدوام 😅</p>'}
         <p class="hint">ضمن الدوام (${t12(t.range.from)} – ${t12(t.range.to)}).${state.partner.shift !== 'morning' || (prof(you).addHeat1 && state.partner.heatTrack !== 'morning') ? '' : ` إعدادات ${esc(nB)} تتعدل من الإعدادات.`}</p>
       </section>
+      ${(() => {
+        const up = X.examTimeline(d, you, now()).list.filter((e) => !e.done).slice(0, 3);
+        return up.length ? `<section class="card partner-ex rise"><h4>${fruitSVG(fruitOf(you), 26)} امتحانات ${esc(nB)} الجاية</h4>
+          ${up.map((e) => `<div class="row-line"><span>${esc(noEmoji(X.partnerExamLine(d, you, e, e.dayDiff)))}</span><em class="tag ${X.takesSubject(d, me, e.subject) ? 'tag-amend' : ''}">${X.takesSubject(d, me, e.subject) ? 'سوه' : 'بس إل' + (prof(you).gender === 'f' ? 'ها' : 'ه')}</em></div>`).join('')}</section>` : '';
+      })()}
       <div class="day-chips rise">${chips}</div>
       <div class="tg-head rise"><span></span><b class="who-a">${avatar(me, 'xs')}${esc(nA)}</b><b class="who-b">${avatar(you, 'xs')}${esc(nB)}</b></div>
       <div class="tg rise" style="height:${H}px">
@@ -554,18 +650,8 @@ function viewSettingsPage() {
     <p class="sync-state">${state.dirty ? `<b>${f ? 'عندچ' : 'عندك'} تغييرات ما وصلت بعد</b>${pending ? ` · ${pending} تعديل بالجدول` : ''}` : `${icons.check()}<span>كلشي واصل</span>`}</p>
     <button class="btn primary" data-act="sync">${icons.swap()}<span>احفظ ودزها للبوت</span></button>
     <p class="hint">${canSendData
-      ? `التطبيق راح يتسكر وتجي${f ? 'چ' : 'ك'} رسالة تأكيد من البوت. التعديلات توصل لـ${youName} خلال دقائق.`
+      ? `التطبيق يتسكر، والتعديل يوصل لـ${youName} أول ما يشتغل البوت على GitHub. هذا ممكن ياخذ من دقائق لساعات، لأن GitHub ما يشغّله بانتظام.`
       : `المزامنة تشتغل بس من زر «📅 جدولي» اللي <b>تحت مربع الكتابة</b> بالبوت (مو زر القائمة). إذا ما موجود، دز /start للبوت.`}</p>
-  </section>
-
-  <section class="card set rise">
-    <h4>${icons.bell()} التنبيهات</h4>
-    <label class="field"><span>رسالة الجدول</span>
-      <select data-input="notify.nightly">${[['off', 'مطفية'], ['7', '7 الصبح · جدول اليوم'], ['19', '7 بالليل · جدول باجر'], ['20', '8 بالليل · جدول باجر'], ['21', '9 بالليل · جدول باجر'], ['22', '10 بالليل · جدول باجر']]
-        .map(([v, l]) => `<option value="${v}" ${String(state.notify.nightly) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-    <span class="field-k">قبل كل محاضرة</span>
-    ${U.segmented('lead', String(state.notify.lead), [['0', 'لا'], ['10', '10 دقايق'], ['15', 'ربع ساعة'], ['30', 'نص ساعة']], { act: 'setNotify' })}
-    <p class="hint">البوت يدز التنبيه. GitHub أحياناً يتأخر كم دقيقة.</p>
   </section>
 
   ${editScheduleCard()}
@@ -619,6 +705,165 @@ function viewSettingsPage() {
   </section>
 
   <p class="foot rise">${esc(d.department)} · ${esc(d.semester)}<br>شنو باجر · جدولي</p>`;
+}
+
+// ───────── exams page ─────────
+function viewExamsPage() {
+  const d = state.data, id = viewId(), you = other(id);
+  const tl = X.examTimeline(d, id, now());
+  const total = tl.list.length, done = tl.list.filter((e) => e.done).length;
+  const chain = tl.list.map((e, i) => `${i ? `<i class="bond ${e.done ? 'done' : ''}"></i>` : ''}<span class="chain-el ${e.done ? 'done' : ''} ${tl.next?.id === e.id ? 'next' : ''}" title="${esc(d.subjects[e.subject].name)}">${tile(d, e.subject, { size: 'xs' })}${e.done ? `<b class="chk">${icons.check()}</b>` : ''}</span>`).join('');
+  const rows = [];
+  tl.list.forEach((e, i) => {
+    const gap = tl.gaps[i - 1];
+    if (gap && gap.days && !e.done) {
+      const nick = esc(X.examNick(d, e.subject));
+      const txt = gap.left === gap.days ? `عندك ${daysCount(gap.days)} قبل ${nick}` : gap.left ? `باقي ${daysCount(gap.left)} قبل ${nick}` : `آخر يوم قبل ${nick}`;
+      rows.push(`<div class="ex-gap rise"><span class="gap-dots" aria-hidden="true">${gap.dates.map((ds) => `<i class="${ds < tl.today ? 'past' : ds === tl.today ? 'now' : ''}"></i>`).join('')}</span><span>${txt}</span></div>`);
+    }
+    const isNext = tl.next?.id === e.id;
+    const r = reactionOf(e.id);
+    const log = state.examLog[e.id] || {};
+    rows.push(`<div class="ex-row rise ${e.done ? 'done' : ''} ${isNext ? 'next' : ''}">
+      <div class="ex-date"><b>${S.DAY_NAMES[e.dayKey]}</b><small>${dateLabel(e.date, { withDay: false })}</small></div>
+      <div class="ex-node s-${e.subject}" aria-hidden="true">${e.done ? icons.check() : ''}</div>
+      <div class="ex-card s-${e.subject}">
+        <div class="ex-main">${tile(d, e.subject, { size: 'sm' })}
+          <span><b>${esc(d.subjects[e.subject].name)}</b><small>${esc(X.examTimeText(e))}${!e.done ? ` · ${X.daysLeftText(e.dayDiff)}` : ''}</small></span>
+          ${isNext ? '<em class="tag tag-next">الجاي</em>' : ''}</div>
+        ${e.done && !state.peek ? `<div class="ex-after">
+          ${r ? `<span class="ex-r">${r[1]} ${r[2]}</span>` : `<span class="ex-ask">شلون كان؟</span>${REACTIONS.map(([k, emo, label]) => `<button class="react-mini" data-act="react" data-id="${e.id}" data-r="${k}" aria-label="${label}">${emo}</button>`).join('')}`}
+          <input class="grade" data-input="grade" data-id="${e.id}" inputmode="decimal" maxlength="7" placeholder="الدرجة" value="${esc(log.g || '')}" aria-label="درجة ${esc(d.subjects[e.subject].nick)}">
+        </div>` : ''}
+      </div>
+    </div>`);
+  });
+  const pUp = X.examTimeline(d, you, now()).list.filter((e) => !e.done);
+  return `<header class="page-h rise"><h2>امتحانات المد</h2><span>${total ? `${done} من ${total} خلصت` : 'ماكو امتحانات'}</span></header>
+    <div class="chain rise" aria-label="${done} من ${total}">${chain}</div>
+    ${tl.next ? examCard(tl.next, { when: `${X.dayWord(tl.next.dayDiff, tl.next.dayKey)}${tl.next.dayDiff >= 2 ? ` · ${X.daysLeftText(tl.next.dayDiff)}` : ''}`, luck: luckFor(tl.next) }) : `<div class="empty rise">${icons.party()}<b>خلصت المد!</b><span>ولا امتحان باقي 🎉</span></div>`}
+    <div class="ex-tl">${rows.join('')}</div>
+    ${pUp.length ? `<section class="card partner-ex rise"><h4>${fruitSVG(fruitOf(you), 26)} امتحانات ${esc(prof(you).name)}</h4>
+      ${pUp.map((e) => `<div class="row-line"><span>${esc(noEmoji(X.partnerExamLine(d, you, e, e.dayDiff)))}</span>${X.takesSubject(d, id, e.subject) ? '' : `<em class="tag">بس إل${prof(you).gender === 'f' ? 'ها' : 'ه'}</em>`}</div>`).join('')}</section>` : ''}
+    <p class="hint rise">المواعيد من جدول القسم. الامتحان اللي وقته ما متبلغ يبقى بدون وكت لحد ما ينعلن.</p>`;
+}
+
+// ───────── in-app reminders (the only reminders: nothing is sent to Telegram) ─────────
+let inboxCache = [];
+function inboxItems() {
+  if (!state.profile || !state.data) return [];
+  const d = state.data, me = state.profile, you = other(me), z = Z();
+  const items = [];
+  for (const l of X.examBrief(d, me, now()).lines) {
+    items.push({
+      id: `ex|${l.kind}|${l.exam.id}|${z.dateStr}`, tone: l.kind === 'partner' ? 'partner' : 'exam', act: 'openExams',
+      icon: l.kind === 'partner' ? fruitSVG(fruitOf(you), 28) : tile(d, l.exam.subject, { size: 'xs' }),
+      text: l.kind === 'partner' ? noEmoji(l.text) : l.text, sub: l.luck || '',
+    });
+  }
+  const f = X.focusSuggestion(d, me, now());
+  if (f && f.days >= 2 && f.days <= 7) items.push({ id: `focus|${z.dateStr}`, icon: icons.sparkle(), act: 'openExams', text: `ركّز اليوم على ${X.examNick(d, f.exam.subject)}`, sub: `امتحانها ${X.daysLeftText(f.days)}` });
+  const n = S.nowInfo(d, me, state.settings, now());
+  if (n.next && n.next.dayOffset === 0 && n.next.startsInMin <= 60) {
+    const x = n.next.entry.sessions.find((s) => s.attending) || n.next.entry.sessions[0];
+    items.push({ id: `lec|${z.dateStr}|${n.next.entry.start}`, icon: tile(d, x.subject, { size: 'xs' }), act: 'tab', tab: 'now', text: `بعد ${S.durationAr(n.next.startsInMin)}: ${d.subjects[x.subject].nick}`, sub: `${x.location} · ${S.time12Str(n.next.entry.start)}` });
+  }
+  for (const ds of [z.dateStr, S.addDays(z.dateStr, 1)]) {
+    for (const e of S.activeEntries(S.dayPlan(d, me, state.settings, ds))) {
+      if (!e.clash || e.chosen || (ds === z.dateStr && e.end <= z.minutes)) continue;
+      items.push({ id: `clash|${ds}|${e.start}`, icon: icons.clash(), act: 'tab', tab: ds === z.dateStr ? 'now' : 'tomorrow', text: `${ds === z.dateStr ? 'اليوم' : 'باجر'} عندك تصادم ${S.time12Str(e.start)}`, sub: e.sessions.map((x) => d.subjects[x.subject].nick).join(' ✕ ') });
+    }
+  }
+  for (const e of (state.shared?.edits || []).filter((x) => x.by === you).slice(-4)) {
+    items.push({ id: `edit|${e.id}`, icon: fruitSVG(fruitOf(you), 28), act: 'openSettings', tone: 'partner', text: `${prof(you).name} ${prof(you).gender === 'f' ? 'عدّلت' : 'عدّل'} الجدول`, sub: describeEdit(e) });
+  }
+  for (const e of X.examTimeline(d, me, now()).list.filter((x) => x.done && !state.examLog[x.id])) {
+    items.push({ id: `react|${e.id}`, icon: tile(d, e.subject, { size: 'xs' }), act: 'askReact', exam: e.id, text: `شلون كان امتحان ${X.examNick(d, e.subject)}؟`, sub: 'سجّل شعورك والدرجة' });
+  }
+  if (state.dirty) items.push({ id: `dirty|${z.dateStr}`, icon: icons.swap(), act: 'openSettings', text: `عندك تغييرات ما وصلت لـ${prof(you).name}`, sub: 'من الإعدادات دوس «احفظ ودزها للبوت»' });
+  return items;
+}
+
+function inboxHTML() {
+  inboxCache = inboxItems();
+  const g = prof(state.profile).gender;
+  return `<div class="scrim" data-act="closeInbox"></div>
+    <div class="sheet inbox" role="dialog" aria-modal="true" aria-label="التذكيرات">
+      <div class="sheet-grab"></div>
+      <h3 class="inbox-h">${icons.bell()}<span>تذكيراتك</span><small>كلها هنا، ما ندز شي لتيليگرام</small></h3>
+      ${inboxCache.length ? inboxCache.map((it, i) => `<button class="inbox-item tone-${it.tone || 'base'} ${state.seen.includes(it.id) ? '' : 'new'}" data-act="inboxGo" data-i="${i}">
+        <span class="ii-ico">${it.icon}</span><span class="ii-txt"><b>${esc(it.text)}</b>${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</span></button>`).join('')
+      : `<div class="empty">${fruitSVG(fruitOf(state.profile), 72)}<b>ماكو شي جديد</b><span>${g === 'f' ? 'استانسي' : 'استانس'}، كلشي تحت السيطرة</span></div>`}
+    </div>`;
+}
+
+function reactHTML() {
+  const d = state.data, e = X.examsFor(d, state.profile).find((x) => x.id === state.react);
+  if (!e) { state.react = null; return ''; }
+  const g = prof(state.profile).gender;
+  return `<div class="scrim" data-act="closeReact"></div>
+    <div class="sheet react-sheet" role="dialog" aria-modal="true" aria-label="شلون كان الامتحان">
+      <div class="sheet-grab"></div>
+      <div class="react-top">${tile(d, e.subject, { size: 'lg' })}${fruitSVG(fruitOf(state.profile), 64)}</div>
+      <h3>شلون كان امتحان ${esc(X.examNick(d, e.subject))}؟</h3>
+      <p class="hint">${g === 'f' ? 'اختاري' : 'اختار'} اللي يوصف شعورك. محد يشوفه غيرك.</p>
+      <div class="react-grid">${REACTIONS.map(([k, emo, label]) => `<button class="react-btn ${state.examLog[e.id]?.r === k ? 'on' : ''}" data-act="react" data-id="${e.id}" data-r="${k}"><span class="emo">${emo}</span><span>${label}</span></button>`).join('')}</div>
+      <label class="field"><span>الدرجة (اختياري، تگدر تضيفها بعدين)</span><input data-input="grade" data-id="${e.id}" inputmode="decimal" maxlength="7" placeholder="مثلاً 17/20" value="${esc(state.examLog[e.id]?.g || '')}"></label>
+      <button class="btn ghost" data-act="closeReact">بعدين</button>
+    </div>`;
+}
+
+/** After the app opens: ask about the latest finished exam, or celebrate the end of midterms (once). */
+function afterOpen() {
+  if (!state.profile || state.peek || state.asked) return;
+  state.asked = true;
+  const tl = X.examTimeline(state.data, state.profile, now());
+  const pending = tl.list.filter((e) => e.done && !state.examLog[e.id] && X.daysBetween(e.date, tl.today) <= 7).pop();
+  if (pending) { state.react = pending.id; renderSheet(); syncBack(); return; }
+  celebrate();
+}
+
+function celebrate() {
+  const tl = X.examTimeline(state.data, state.profile, now());
+  if (!X.celebrationDue(tl, state.midDone)) return;
+  state.midDone = true; save('midDone');
+  const g = prof(state.profile).gender;
+  const el = document.createElement('div');
+  el.className = 'celebrate';
+  el.innerHTML = `<canvas aria-hidden="true"></canvas>
+    <div class="cel-card" role="dialog" aria-modal="true" aria-label="خلصت المد">
+      <div class="cel-fruits">${fruitSVG('dragon', 92)}${fruitSVG('peach', 92)}</div>
+      <h2>خلصت المد! 🎉</h2>
+      <p>${tl.list.length} امتحانات وخلصت. ${g === 'f' ? 'تستاهلين' : 'تستاهل'} راحة حلوة.</p>
+      <button class="btn primary" data-act="closeCelebrate">يلا نرتاح</button>
+    </div>`;
+  document.body.appendChild(el);
+  tg.haptic('success');
+  if (!matchMedia('(prefers-reduced-motion: reduce)').matches) confetti(el.querySelector('canvas'));
+}
+
+/** Short, tasteful confetti in the subject colours (~2.6 s), then it stops. */
+function confetti(canvas) {
+  const ctx = canvas.getContext('2d');
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const W = (canvas.width = innerWidth * dpr), H = (canvas.height = innerHeight * dpr);
+  const colors = ['#8b5cf6', '#0d9488', '#3b82f6', '#ec4899', '#d97706', '#f97316', '#fbbf24', '#b7ea6e'];
+  const parts = Array.from({ length: 130 }, () => ({
+    x: W / 2 + (Math.random() - 0.5) * W * 0.3, y: H * 0.42, vx: (Math.random() - 0.5) * 14 * dpr, vy: (-6 - Math.random() * 12) * dpr,
+    s: (4 + Math.random() * 6) * dpr, r: Math.random() * 6.28, vr: (Math.random() - 0.5) * 0.3, c: colors[(Math.random() * colors.length) | 0], round: Math.random() < 0.3,
+  }));
+  const t0 = performance.now();
+  (function frame(t) {
+    const k = (t - t0) / 2600;
+    ctx.clearRect(0, 0, W, H);
+    for (const p of parts) {
+      p.vy += 0.35 * dpr; p.vx *= 0.99; p.x += p.vx; p.y += p.vy; p.r += p.vr;
+      ctx.save(); ctx.globalAlpha = Math.max(0, 1 - k * k); ctx.translate(p.x, p.y); ctx.rotate(p.r); ctx.fillStyle = p.c;
+      if (p.round) { ctx.beginPath(); ctx.arc(0, 0, p.s / 2, 0, 6.28); ctx.fill(); } else ctx.fillRect(-p.s / 2, -p.s / 4, p.s, p.s / 2);
+      ctx.restore();
+    }
+    if (k < 1) requestAnimationFrame(frame); else ctx.clearRect(0, 0, W, H);
+  })(t0);
 }
 
 // ───────── schedule editor (shared with the other person through the bot) ─────────
@@ -725,6 +970,8 @@ function nextWorkday(dateStr) {
 function renderSheet() {
   const root = $('#sheet-root');
   if (state.editing) { root.innerHTML = editSheetHTML(); return; }
+  if (state.react) { root.innerHTML = reactHTML(); return; }
+  if (state.inbox) { root.innerHTML = inboxHTML(); return; }
   if (!state.sheet) { root.innerHTML = ''; return; }
   const d = state.data;
   const s = viewSettings();
@@ -771,18 +1018,18 @@ function renderPicker() {
   $('#tabs').hidden = true;
   $('#view').innerHTML = '';
   const d = state.data;
-  const card = (id, sym, line) => `<button class="pick s-${id === 'carrier' ? 'heat1' : 'equipment'}" data-act="pick" data-id="${id}">
+  const card = (id, line) => `<button class="pick s-${id === 'carrier' ? 'equipment' : 'refining'} pick-${fruitOf(id)}" data-act="pick" data-id="${id}" aria-label="${esc(prof(id).name)}">
       ${avatar(id, 'xl')}
-      <span class="pick-el el s-${id === 'carrier' ? 'heat1' : 'equipment'}"><span class="el-sym">${sym}</span></span>
-      <b>${esc(prof(id).name)}</b><span>${line}</span></button>`;
+      ${photoBadge(id)}
+      <b>${esc(prof(id).name)} ${prof(id).emoji || ''}</b><span>${line}</span></button>`;
   $('#picker-root').innerHTML = `<div class="picker">
     <div class="picker-hex" aria-hidden="true"></div>
     <p class="picker-k">شنو باجر · جدولي</p>
     <h1>منو أنت؟</h1>
-    <p class="picker-sub">دوس على صورتك، والتطبيق كله يصير إلك.</p>
+    <p class="picker-sub">دوس على فاكهتك، والتطبيق كله يصير إلك.</p>
     <div class="pick-row">
-      ${card('carrier', 'Mo', 'الرابع + هيت 1 محمول')}
-      ${card('standard', 'Kh', 'الرابع · جدول كامل')}
+      ${card('carrier', 'فاكهة التنين · الرابع + هيت 1')}
+      ${card('standard', 'الخوخة · الرابع، جدول كامل')}
     </div>
     <p class="foot">${esc(d.department)}</p>
   </div>`;
@@ -791,10 +1038,14 @@ function renderPicker() {
 // ───────── actions ─────────
 const act = {
   pick(el) {
-    state.profile = el.dataset.id; save('profile');
-    state.tab = smartTab();
+    wobble(el.querySelector('.ava'));
     tg.haptic('success');
-    render();
+    setTimeout(() => {
+      state.profile = el.dataset.id; save('profile');
+      state.tab = smartTab();
+      render();
+      setTimeout(afterOpen, 700);
+    }, 380);
   },
   tab(el) {
     state.tab = el.dataset.tab; state.sub = null;
@@ -806,7 +1057,37 @@ const act = {
     state.peek = !state.peek;
     tg.haptic('select');
     render();
+    wobble($('.fruit-btn'));
   },
+  wobble(el) { wobble(el); tg.haptic('light'); },
+  openExams() { state.sub = 'exams'; state.inbox = false; tg.haptic('light'); render(); window.scrollTo(0, 0); },
+  openInbox() {
+    state.inbox = true; tg.haptic('light');
+    renderSheet(); syncBack();
+    state.seen = [...new Set([...state.seen, ...inboxCache.map((i) => i.id)])].slice(-60);
+    save('seen');
+    renderTop();
+  },
+  closeInbox() { state.inbox = false; renderSheet(); syncBack(); },
+  inboxGo(el) {
+    const it = inboxCache[+el.dataset.i];
+    state.inbox = false;
+    if (!it) return renderSheet();
+    if (it.act === 'askReact') { state.react = it.exam; renderSheet(); syncBack(); return; }
+    if (it.act === 'tab') { state.sub = null; state.tab = it.tab; renderSheet(); render(); return; }
+    renderSheet();
+    act[it.act]?.();
+  },
+  askReact(el) { state.react = el.dataset.id; renderSheet(); syncBack(); },
+  react(el) {
+    const { id, r } = el.dataset;
+    state.examLog[id] = { ...(state.examLog[id] || {}), r };
+    save('examLog'); tg.haptic('success');
+    if (state.react) { state.react = null; renderSheet(); syncBack(); celebrate(); }
+    render({ anim: false });
+  },
+  closeReact() { state.react = null; renderSheet(); syncBack(); celebrate(); },
+  closeCelebrate() { document.querySelector('.celebrate')?.remove(); },
   openSettings() { state.sub = 'settings'; render(); window.scrollTo(0, 0); },
   closeSub() { state.sub = null; render(); window.scrollTo(0, 0); },
   set(el) {
@@ -873,11 +1154,12 @@ const act = {
   tday(el) { state.togetherDay = el.dataset.day; tg.haptic('select'); render({ anim: false }); },
   share(el) {
     const plan = S.dayPlan(state.data, viewId(), viewSettings(), el.dataset.date);
-    const who = state.peek ? prof(viewId()).name : (tg.user?.first_name || prof(state.profile).name);
-    const text = S.planText(state.data, plan, { title: `📅 جدول ${who} · ${el.dataset.title} (${dateLabel(plan.dateStr)})` });
+    const p = prof(viewId());
+    const exams = X.examsOn(state.data, viewId(), plan.dateStr).map((e) => `📝 امتحان ${state.data.subjects[e.subject].name} · ${X.examTimeText(e)}`);
+    let text = S.planText(state.data, plan, { title: `📅 ${p.emoji || ''} جدول ${p.name} · ${el.dataset.title} (${dateLabel(plan.dateStr)})` });
+    if (exams.length) text = text.replace('\n', `\n${exams.join('\n')}\n`);
     tg.openLink(`https://t.me/share/url?url=${encodeURIComponent(BOT_LINK)}&text=${encodeURIComponent(text)}`);
   },
-  setNotify(el) { state.notify.lead = Number(el.dataset.value); save('notify'); tg.haptic('select'); render({ anim: false }); },
   editDay(el) { state.editDay = el.dataset.day; tg.haptic('select'); render({ anim: false }); },
   editAdd() {
     const slot = state.settings.shift === 'evening' ? 'E1' : 'S1';
@@ -920,7 +1202,7 @@ const act = {
   sync() {
     const payload = {
       v: 1, profile: state.profile,
-      prefs: { ...pick(state.settings, ['shift', 'heatTrack', 'labGroup']), nightly: String(state.notify.nightly), lead: Number(state.notify.lead), clash: state.settings.clashChoices },
+      prefs: { ...pick(state.settings, ['shift', 'heatTrack', 'labGroup']), clash: state.settings.clashChoices },
       edits: state.outbox.edits, subjects: state.outbox.subjects,
     };
     const str = JSON.stringify(payload);
@@ -934,16 +1216,13 @@ const act = {
     tg.haptic('success');
     setTimeout(() => tg.sendData(str), 120);
   },
-  async copyId(el) {
-    const id = el.dataset.id;
-    try { await navigator.clipboard.writeText(id); } catch {
-      const ta = document.createElement('textarea'); ta.value = id; document.body.appendChild(ta); ta.select();
-      try { document.execCommand('copy'); } catch {} ta.remove();
-    }
-    tg.haptic('success');
-    el.querySelector('span').textContent = 'انسخ ✓';
-  },
 };
+
+function wobble(el) {
+  if (!el) return;
+  el.classList.remove('wobble'); void el.offsetWidth; el.classList.add('wobble');
+  el.addEventListener('animationend', () => el.classList.remove('wobble'), { once: true });
+}
 
 /** The date a tapped tile refers to, by current tab. */
 function contextDate() {
@@ -1017,8 +1296,9 @@ async function boot() {
     }
   } else if (cloud && state.profile) {
     // First run inside Telegram with local data only → push it up.
-    ['profile', 'settings', 'clash', 'overrides', 'partner', 'theme', 'outbox', 'notify'].forEach(save);
+    ['profile', 'settings', 'clash', 'overrides', 'partner', 'theme', 'outbox', 'examLog', 'midDone'].forEach(save);
   }
+  setTimeout(afterOpen, 700);
 
   tg.on('themeChanged', () => { applyTheme(); render({ anim: false }); });
   tg.on('safeAreaChanged', applyInsets);
@@ -1040,8 +1320,10 @@ document.addEventListener('click', (ev) => {
   if (fn) { ev.preventDefault(); fn(el); }
 });
 document.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Escape' && state.sheet) closeSheet();
-  if ((ev.key === 'Enter' || ev.key === ' ') && ev.target.matches('article[data-act]')) { ev.preventDefault(); ev.target.click(); }
+  if (ev.key === 'Escape') {
+    if (state.react) act.closeReact(); else if (state.inbox) act.closeInbox(); else if (state.sheet) closeSheet();
+  }
+  if ((ev.key === 'Enter' || ev.key === ' ') && ev.target.matches('[role="button"][data-act]:not(button)')) { ev.preventDefault(); ev.target.click(); }
 });
 function toast(msg) {
   const t = document.createElement('div');
@@ -1063,7 +1345,12 @@ document.addEventListener('change', (ev) => {
     if (el.tagName === 'SELECT') renderSheet();
     return;
   }
-  if (k === 'notify.nightly') { state.notify.nightly = el.value; save('notify'); render({ anim: false }); return; }
+  if (k === 'grade') {
+    const id = el.dataset.id;
+    state.examLog[id] = { ...(state.examLog[id] || {}), g: el.value.trim().slice(0, 7) };
+    save('examLog'); tg.haptic('light');
+    return;
+  }
   if (k === 'subj') {
     const id = el.dataset.id, name = el.value.trim();
     if (name && name !== state.data.subjects[id].name) {

@@ -17,7 +17,7 @@ Judgement calls made while building جدولي, so any of them can be revisited.
 
 ## The other person's settings
 
-11. Each user's CloudStorage is private to them, so the app cannot read the partner's real settings. For "سوه" and the "شوف جدول …" peek, the app uses a **local copy of the partner's settings** (shift, and for محمد the Heat 1 track). It defaults to morning and can be edited in Settings → "جدول [الاسم]". The peek view is read-only (no clash choices, no overrides).
+11. Each user's CloudStorage is private to them, so the app cannot read the partner's real settings. For "سوه" and the partner peek (fruit button), the app uses a **local copy of the partner's settings** (shift, and for محمد the Heat 1 track). It defaults to morning and can be edited in Settings → "جدول [الاسم]". The peek view is read-only (no clash choices, no overrides).
 
 ## Storage
 
@@ -56,6 +56,43 @@ Judgement calls made while building جدولي, so any of them can be revisited.
 35. **Identity**: the first chat to sync a profile claims it. Others are refused, so strangers who /start the bot can't edit the timetable.
 36. **Notifications**: default 8 PM summary of tomorrow + 15 min before each session (both configurable). The job sleeps up to 4 min to hit the exact time, dedupes through the sent log, and skips a lecture reminder once the lecture has started. GitHub cron can be a few minutes late; this is documented.
 37. The `RECIPIENTS` secret and the old nightly workflow were removed. The bot learns chat ids from the sync itself.
+
+## Update 01 (midterms, in-app reminders, fruit avatars)
+
+38. **Why Telegram notifications never worked (diagnosed 2026-11-15):**
+    - Actions was enabled and `bot.yml` was active on `main`. There was no webhook, and `BOT_TOKEN` existed.
+    - But GitHub ran the `*/5` schedule only **4 times in ~22 h**, instead of ~190.
+    - `shared.json` showed that **no one ever completed a sync**: no `web_app_data` was received, so nobody was registered and there was no one to notify.
+    - `RECIPIENTS` and `reminder.yml` no longer existed (replaced in round 2).
+39. **Per محمد: reminders are in-app only.** The bot no longer sends any scheduled message. The notification code (`plannedNotifications`, `dueNotifications`, the notification settings card) was removed. The calendar `.ics` export from the brief was dropped too, because it's a reminder outside the app. The bot job remains for sync only, at `*/10` 07:00–22:50 Baghdad, and its unreliability is stated in the app and in SETUP_AR.
+40. **In-app reminders = a bell inbox** in the header with an unseen-count badge. Items are computed live (nothing is stored except the "seen" ids):
+    - your exam today/tomorrow (with a rotating good-luck line)
+    - the partner's exam today/tomorrow (or "you're in the same exam")
+    - "ركّز اليوم على…" (only 2–7 days ahead, so it doesn't repeat the tomorrow line)
+    - a lecture within 60 min
+    - an undecided clash today/tomorrow
+    - the partner's synced edits
+    - an exam waiting for a reaction
+    - unsynced changes
+41. **Exams live in `data/schedule.json` → `exams`.** An exam applies to a profile when the profile takes the subject (`dropSubjects` excluded, `heat1` only with `addHeat1`). Logic is in the pure `core/exams.js`.
+42. **"Done" time of an exam**: start + 120 min when the time is known. When the time is unknown, it's done at 14:30, the end of the campus day; this is only used internally and **never shown as a time**. The UI shows "الوقت ما متبلغ بعد".
+43. **Countdown**:
+    - Unknown time → whole days only ("باجر", "بعد 5 أيام").
+    - Known time → a live clock inside the last 48 h.
+44. **Exam day**: the exam card is the top card on "هسه" (today) and on "باجر" (tomorrow, or the next-working-day preview after a weekend). The season banner shows the next exam not already shown as a card. The exam card has its own calm design: a night-ink sky, a slowly breathing orb with a "شهيق… زفير" guide, and a single good-luck line. Breathing is hidden under reduced motion.
+45. **Exams view is a sub-page**, not a sixth tab: it opens from the banner, the exam card and the bell, and uses the BackButton, so the bottom bar stays ≤ 5 tabs. It shows:
+    - a molecule "chain" of the exams (done = faded + ✓)
+    - the next-exam card
+    - a vertical timeline with study-day dots between exams (past days dim, today glowing)
+    - reactions and grade on done exams
+    - the partner's upcoming exams, tagged "سوه" or "بس إلها/إله"
+46. **"شلون كان الامتحان؟"** opens once per app launch, for the most recent finished exam (≤ 7 days old) without a reaction. It offers 4 reactions plus an optional grade, stored in CloudStorage key `examLog`. If skipped, it stays in the bell until answered.
+47. **The celebration** shows when every exam of your profile is done, once per user (CloudStorage `midDone`):
+    - a 2.6 s canvas confetti in the subject colours (skipped under reduced motion)
+    - haptic success
+    - both fruits bobbing
+48. **Fruits:** محمد = dragon fruit, خلود = peach. They're drawn as inline SVG in one shared style (plum outline, top-left light, shared leaf greens, the same small face). Below 30 px they switch to a simplified version without the face, to stay crisp at 20 px. They replace the photo avatars everywhere. The real photos remain only as small benzene-ring badges on the first-run picker. The peek button is icon-only (the other person's fruit, `aria-label` "جدول خلود/محمد") and wobbles with haptics on tap. Telegram texts (share, bot replies) use 🍑/🐉.
+49. **Good-luck lines** rotate deterministically by date + exam id (6 per gender), so they don't repeat on consecutive days.
 
 ## Repo & security
 
