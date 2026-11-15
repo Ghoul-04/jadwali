@@ -14,6 +14,7 @@ test('sync: claims profile, shares edits and tells the partner (with their fruit
       { id: 'bad', stream: 'nope', op: 'add' }],
   })], priv, shared, 'https://x/');
   assert.equal(priv.offset, 3);
+  assert.deepEqual(Object.keys(priv.chats).sort(), ['111', '222']); // remembered for announcements
   assert.deepEqual(priv.claims, { standard: '111', carrier: '222' });
   assert.equal(shared.edits.length, 1);
   assert.equal(shared.people.carrier.labGroup, 'A');

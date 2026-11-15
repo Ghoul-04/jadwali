@@ -19,7 +19,7 @@ const str = (v, n) => (typeof v === 'string' ? v.trim().slice(0, n) : null);
 
 // ───────── state ─────────
 export function emptyShared() { return { version: 1, updatedAt: null, subjects: {}, edits: [], people: {} }; }
-export function emptyPrivate() { return { offset: 0, users: {}, claims: {} }; }
+export function emptyPrivate() { return { offset: 0, users: {}, claims: {}, chats: {} }; }
 
 const keyFrom = (token) => createHash('sha256').update(`jadwali-state|${token}`).digest();
 export function encrypt(obj, token) {
@@ -77,6 +77,8 @@ export function processUpdates(updates, priv, shared, appUrl) {
     const m = u.message;
     if (!m || m.chat?.type !== 'private') continue;
     const chat = String(m.chat.id);
+    // Remember everyone who talks to the bot (encrypted), so announcements can reach them.
+    (priv.chats ||= {})[chat] = { name: str(m.from?.first_name, 30) || '', at: m.date || 0 };
     const data = applyShared(BASE, shared);
 
     if (m.web_app_data?.data) {
