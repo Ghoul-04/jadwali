@@ -35,6 +35,20 @@ export function decrypt(b64, token) {
   return JSON.parse(Buffer.concat([d.update(buf.subarray(28)), d.final()]).toString('utf8'));
 }
 
+// ───────── announcement (sent once per chat: by scripts/broadcast.mjs, or here on the next message) ─────────
+export const ANN_ID = 'u01-midterms';
+export const ANNOUNCEMENT = [
+  '🎉 <b>«شنو باجر» تحدّث وتطوّر!</b>',
+  '',
+  '📝 <b>امتحانات المد</b>: عدّاد للامتحان الجاي، كارت خاص بيوم الامتحان، وأيام الدراسة بين كل امتحانين',
+  '🔔 <b>تذكيراتك كلها داخل التطبيق</b>: الجرس فوق',
+  '🐉🍑 <b>فواكه بدل الصور</b>: فاكهة التنين لمحمد والخوخة لخلود',
+  '👀 <b>تشوف امتحانات الثاني</b>، حتى لو ما عندك نفس المادة',
+  '💬 بعد كل امتحان يسألك: شلون كان؟',
+  '',
+  'افتح <b>«📅 جدولي»</b> من الزر اللي تحت 👇',
+].join('\n');
+
 // ───────── sync (pure: easy to test) ─────────
 const OPS = new Set(['add', 'remove', 'update', 'revert']);
 function cleanSession(data, s) {
@@ -78,7 +92,8 @@ export function processUpdates(updates, priv, shared, appUrl) {
     if (!m || m.chat?.type !== 'private') continue;
     const chat = String(m.chat.id);
     // Remember everyone who talks to the bot (encrypted), so announcements can reach them.
-    (priv.chats ||= {})[chat] = { name: str(m.from?.first_name, 30) || '', at: m.date || 0 };
+    priv.chats ||= {};
+    priv.chats[chat] = { ...(priv.chats[chat] || {}), name: str(m.from?.first_name, 30) || '', at: m.date || 0 };
     const data = applyShared(BASE, shared);
 
     if (m.web_app_data?.data) {
@@ -140,6 +155,11 @@ export function processUpdates(updates, priv, shared, appUrl) {
     }
 
     if (typeof m.text === 'string') {
+      if (priv.chats[chat].ann !== ANN_ID) {
+        priv.chats[chat].ann = ANN_ID;
+        out.push({ chat_id: chat, text: ANNOUNCEMENT, reply_markup: keyboard });
+        continue;
+      }
       const known = priv.users[chat];
       out.push({
         chat_id: chat,

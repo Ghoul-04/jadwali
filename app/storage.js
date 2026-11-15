@@ -37,7 +37,7 @@ function cloudRemove(key) {
   }));
 }
 
-export const KEYS = ['profile', 'settings', 'clash', 'overrides', 'partner', 'theme', 'outbox', 'examLog', 'midDone', 'seen', 'dirty'];
+export const KEYS = ['profile', 'settings', 'clash', 'overrides', 'partner', 'theme', 'outbox', 'examLog', 'midDone', 'seen', 'news', 'dirty'];
 
 export const storage = {
   /** Fast synchronous read from the local mirror. */

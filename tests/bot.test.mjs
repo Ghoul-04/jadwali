@@ -31,6 +31,18 @@ test('sync: claims profile, shares edits and tells the partner (with their fruit
   assert.equal(shared.edits.length, 0);
 });
 
+test('update announcement goes out once per chat on its next message', () => {
+  const priv = emptyPrivate(), shared = emptyShared();
+  const a = processUpdates([msg(1, 5, { text: 'هلا' })], priv, shared, 'https://x/');
+  assert.match(a[0].text, /تحدّث وتطوّر/);
+  assert.ok(a[0].reply_markup.keyboard);
+  const b = processUpdates([msg(2, 5, { text: 'هلا ثاني' })], priv, shared, 'https://x/');
+  assert.doesNotMatch(b[0].text, /تحدّث وتطوّر/);
+  priv.chats['6'] = { name: 'y', ann: 'u01-midterms' }; // already got it from the broadcast script
+  const c = processUpdates([msg(3, 6, { text: '/start' })], priv, shared, 'https://x/');
+  assert.doesNotMatch(c[0].text, /تحدّث وتطوّر/);
+});
+
 test('private state round-trips through encryption', () => {
   const p = { offset: 5, users: { 1: { profile: 'carrier' } }, claims: {} };
   const enc = encrypt(p, 'tok');

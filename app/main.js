@@ -123,6 +123,7 @@ function applyStored(st) {
   if (st.examLog && typeof st.examLog === 'object') state.examLog = st.examLog;
   if (typeof st.midDone === 'boolean') state.midDone = st.midDone;
   if (Array.isArray(st.seen)) state.seen = st.seen;
+  if (typeof st.news === 'string') state.news = st.news;
   if (typeof st.dirty === 'boolean') state.dirty = st.dirty;
 }
 function pick(o, keys) { const r = {}; for (const k of keys) if (o[k] !== undefined) r[k] = o[k]; return r; }
@@ -813,9 +814,31 @@ function reactHTML() {
     </div>`;
 }
 
-/** After the app opens: ask about the latest finished exam, or celebrate the end of midterms (once). */
+// One-time "what's new" notice inside the app (reaches users without the bot needing their chat id).
+const NEWS_ID = 'u01-midterms';
+function newsHTML() {
+  const p = prof(state.profile), f = p.gender === 'f';
+  return `<div class="scrim" data-act="closeNews"></div>
+    <div class="sheet news-sheet" role="dialog" aria-modal="true" aria-label="تحديث جديد">
+      <div class="sheet-grab"></div>
+      <div class="news-fruits">${fruitSVG('dragon', 76)}${fruitSVG('peach', 76)}</div>
+      <h3>«شنو باجر» تحدّث وتطوّر! 🎉</h3>
+      <p class="hint">هلا ${esc(p.name)}، هذا الجديد ${f ? 'إلچ' : 'إلك'}:</p>
+      <ul class="news-list">
+        <li><span>📝</span><span><b>امتحانات المد</b>: عدّاد للامتحان الجاي، كارت خاص بيوم الامتحان، وأيام الدراسة بين كل امتحانين</span></li>
+        <li><span>🔔</span><span><b>تذكيراتك داخل التطبيق</b>: الجرس فوق</span></li>
+        <li><span>${p.emoji || '🍑'}</span><span><b>فواكه بدل الصور</b>: فاكهة التنين لمحمد والخوخة لخلود</span></li>
+        <li><span>👀</span><span><b>امتحانات ${esc(prof(other(state.profile)).name)}</b> تطلع ${f ? 'عندچ' : 'عندك'} حتى لو مو نفس المادة</span></li>
+        <li><span>💬</span><span>بعد كل امتحان نسأل: <b>شلون كان؟</b></span></li>
+      </ul>
+      <button class="btn primary" data-act="closeNews">يلا نشوف 🚀</button>
+    </div>`;
+}
+
+/** After the app opens: what's new (once), then ask about the latest finished exam, or celebrate the end of midterms (once). */
 function afterOpen() {
   if (!state.profile || state.peek || state.asked) return;
+  if (state.news !== NEWS_ID) { state.newsOpen = true; renderSheet(); tg.haptic('success'); return; }
   state.asked = true;
   const tl = X.examTimeline(state.data, state.profile, now());
   const pending = tl.list.filter((e) => e.done && !state.examLog[e.id] && X.daysBetween(e.date, tl.today) <= 7).pop();
@@ -970,6 +993,7 @@ function nextWorkday(dateStr) {
 function renderSheet() {
   const root = $('#sheet-root');
   if (state.editing) { root.innerHTML = editSheetHTML(); return; }
+  if (state.newsOpen) { root.innerHTML = newsHTML(); return; }
   if (state.react) { root.innerHTML = reactHTML(); return; }
   if (state.inbox) { root.innerHTML = inboxHTML(); return; }
   if (!state.sheet) { root.innerHTML = ''; return; }
@@ -1088,6 +1112,10 @@ const act = {
   },
   closeReact() { state.react = null; renderSheet(); syncBack(); celebrate(); },
   closeCelebrate() { document.querySelector('.celebrate')?.remove(); },
+  closeNews() {
+    state.newsOpen = false; state.news = NEWS_ID; storage.set('news', NEWS_ID);
+    renderSheet(); setTimeout(afterOpen, 250);
+  },
   openSettings() { state.sub = 'settings'; render(); window.scrollTo(0, 0); },
   closeSub() { state.sub = null; render(); window.scrollTo(0, 0); },
   set(el) {
